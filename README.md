@@ -50,7 +50,9 @@ hf download Qwen/Qwen-Image-2.1 --local-dir model/Qwen-Image-2.1
 
 **정밀도 선택 (`precision`)**: `POST /api/v1/generate`의 `precision`으로 DiT 가중치 정밀도를 고를 수 있습니다 (웹 UI에도 선택 항목이 있습니다).
 - `bf16` (기본): 원본 가중치, DiT 약 14GB
-- `int8`: 로딩 시 Linear 가중치를 출력 채널별 int8로 양자화(약 7GB), 계산은 bf16. 모델 파일은 그대로 쓰며 별도 변환이 필요 없습니다.
+- `int8`: Linear 가중치를 출력 채널별 int8로 양자화(약 7GB), 계산은 bf16. 별도 변환 작업은 필요 없습니다.
+  - 첫 int8 요청 때 원본을 양자화하고 결과를 `model/Qwen-Image-2.1-int8/transformer.safetensors`(약 7GB)에 저장합니다. 이후에는 이 파일에서 바로 로딩하므로 로딩이 빠르고(약 16초 → 5~6초) 로딩 중 메모리도 적게 씁니다(약 14.6GB → 2.4GB).
+  - 원본 가중치가 바뀌었거나 캐시가 깨졌으면 자동으로 다시 만듭니다. 캐시 파일을 지워도 안전합니다.
 - 24GB 메모리에서 768×768 이상은 bf16이 스왑으로 매우 느려질 수 있어 int8을 권장합니다. 512×512에서는 속도 차이가 작습니다.
 
 ### 1) Backend
