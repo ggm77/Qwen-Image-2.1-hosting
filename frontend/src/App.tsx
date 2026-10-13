@@ -14,6 +14,18 @@ type GenerateRequest = {
   precision: Precision;
 };
 
+type Job = {
+  id: string;
+  prompt?: string; // task_id 조회로 추가한 작업은 프롬프트를 알 수 없다
+  status: string;
+  currentStep: number;
+  totalSteps: number;
+  imageUrl: string | null;
+  error: string | null;
+  finished: boolean; // 완료·실패·조회 오류로 더 이상 폴링하지 않는 상태
+  ratio: number;
+};
+
 type TaskStatus = {
   task_id: string;
   status: string;
@@ -30,11 +42,12 @@ const MAX_IMAGE_SIZE = 1024;
 const IMAGE_SIZE_STEP = 32;
 const MAX_STEPS = 100;
 const MAX_PROMPT_LENGTH = 2000;
+const MAX_PROMPTS_PER_SUBMIT = 50; // 한 번에 큐에 넣을 수 있는 프롬프트 수 (UI 제한)
 const MAX_SEED = 2 ** 31 - 1; // 랜덤 시드는 JS 정수 안전 범위 안에서만 뽑는다
 
 // 모든 값이 IMAGE_SIZE_STEP(32)의 배수
 const SIZE_PRESETS = [
-  { label: "1:1", width: 768, height: 768 },
+  { label: "1:1", width: 512, height: 512 },
   { label: "4:3", width: 1024, height: 768 },
   { label: "3:4", width: 768, height: 1024 },
   { label: "16:9", width: 1024, height: 576 },
@@ -54,6 +67,9 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 const THEME_STORAGE_KEY = "theme";
+
+// 숫자 입력은 문자열로 들고 있다가 제출할 때 숫자로 바꾼다. (비워도 0이 남지 않도록)
+const digitsOnly = (value: string) => value.replace(/\D/g, "");
 
 type ValidationDetail = { loc?: (string | number)[]; msg: string };
 
@@ -180,42 +196,61 @@ const MoonIcon = ({ size = 18 }: IconProps) => (
   </svg>
 );
 
+const percentOf = (job: Job) =>
+  job.totalSteps > 0 ? Math.min(100, Math.round((job.currentStep / job.totalSteps) * 100)) : 0;
+
+type GenerateResponse = { task_id: string; status: string };
+
+// 프롬프트 하나를 큐에 넣고 task_id를 돌려받는다.
+const requestGenerate = async (payload: GenerateRequest): Promise<GenerateResponse> => {
+  const res = await fetch(`/api/v1/generate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    throw new Error(await readErrorMessage(res, `이미지 생성 요청 실패: ${res.status}`));
+  }
+  return res.json();
+};
+
 const App: React.FC = () => {
   const [prompt, setPrompt] = useState("");
-  const [height, setHeight] = useState(768);
-  const [width, setWidth] = useState(768);
-  const [numSteps, setNumSteps] = useState(20);
-  const [seed, setSeed] = useState(42);
-  const [precision, setPrecision] = useState<Precision>("bf16");
+  const [height, setHeight] = useState("512");
+  const [width, setWidth] = useState("512");
+  const [numSteps, setNumSteps] = useState("20");
+  const [seed, setSeed] = useState("42");
+  const [precision, setPrecision] = useState<Precision>("int8");
 
-  const [taskId, setTaskId] = useState("");
   const [lookupTaskId, setLookupTaskId] = useState("");
-  const [taskStatus, setTaskStatus] = useState("");
-  const [currentStep, setCurrentStep] = useState(0);
-  const [totalSteps, setTotalSteps] = useState(0);
 
-  const [imageUrl, setImageUrl] = useState<string | null>(null);
-  const [isGenerating, setIsGenerating] = useState(false);
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [previewRatio, setPreviewRatio] = useState(1);
   const [copied, setCopied] = useState(false);
   const [theme, setTheme] = useState<Theme>(readStoredTheme);
 
-  const pollTimerRef = useRef<number | null>(null);
+  const pollTimersRef = useRef<Map<string, number>>(new Map());
+  const jobsRef = useRef<Job[]>([]);
   const stageRef = useRef<HTMLElement | null>(null);
 
   useEffect(() => {
-    return () => {
-      if (imageUrl) {
-        URL.revokeObjectURL(imageUrl);
-      }
-    };
-  }, [imageUrl]);
+    jobsRef.current = jobs;
+  }, [jobs]);
 
-  // 언마운트 시 폴링 타이머 정리
+  // 언마운트 시 폴링 타이머와 결과 이미지 URL 정리
   useEffect(() => {
-    return () => stopPolling();
+    const timers = pollTimersRef.current;
+    return () => {
+      timers.forEach((timer) => window.clearInterval(timer));
+      timers.clear();
+      jobsRef.current.forEach((job) => {
+        if (job.imageUrl) URL.revokeObjectURL(job.imageUrl);
+      });
+    };
   }, []);
 
   // 테마 적용: system이면 속성을 제거해 prefers-color-scheme을 따른다
@@ -241,10 +276,15 @@ const App: React.FC = () => {
     }
   };
 
-  const stopPolling = () => {
-    if (pollTimerRef.current !== null) {
-      window.clearInterval(pollTimerRef.current);
-      pollTimerRef.current = null;
+  const updateJob = (id: string, patch: Partial<Job>) => {
+    setJobs((prev) => prev.map((job) => (job.id === id ? { ...job, ...patch } : job)));
+  };
+
+  const stopPolling = (id: string) => {
+    const timer = pollTimersRef.current.get(id);
+    if (timer !== undefined) {
+      window.clearInterval(timer);
+      pollTimersRef.current.delete(id);
     }
   };
 
@@ -258,19 +298,27 @@ const App: React.FC = () => {
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
 
-      setImageUrl((prev) => {
-        if (prev) URL.revokeObjectURL(prev);
-        return url;
+      setJobs((prev) => {
+        // 응답을 기다리는 사이 목록에서 지워졌다면 URL을 바로 해제한다.
+        if (!prev.some((job) => job.id === id)) {
+          URL.revokeObjectURL(url);
+          return prev;
+        }
+        return prev.map((job) => {
+          if (job.id !== id) return job;
+          if (job.imageUrl) URL.revokeObjectURL(job.imageUrl);
+          return { ...job, imageUrl: url };
+        });
       });
     } catch (err) {
       console.error(err);
-      setError(err instanceof Error ? err.message : "알 수 없는 오류입니다.");
+      updateJob(id, { error: err instanceof Error ? err.message : "알 수 없는 오류입니다." });
     }
   };
 
   // task_id 하나의 진행 상황을 주기적으로 조회하며 진행률을 갱신한다.
   const startPolling = (id: string) => {
-    stopPolling();
+    stopPolling(id);
 
     const poll = async () => {
       try {
@@ -280,29 +328,36 @@ const App: React.FC = () => {
         }
 
         const data: TaskStatus = await res.json();
-        setTaskStatus(data.status);
-        setCurrentStep(data.current_step);
-        setTotalSteps(data.num_inference_steps);
+        // 응답을 기다리는 사이 중단·삭제된 작업이면 결과를 무시한다.
+        if (!pollTimersRef.current.has(id)) return;
+
+        updateJob(id, {
+          status: data.status,
+          currentStep: data.current_step,
+          totalSteps: data.num_inference_steps,
+        });
 
         if (data.status === "completed") {
-          stopPolling();
-          setIsGenerating(false);
+          stopPolling(id);
           await fetchImage(id);
+          updateJob(id, { finished: true });
         } else if (data.status === "failed") {
-          stopPolling();
-          setIsGenerating(false);
-          setError("태스크가 실패했습니다.");
+          stopPolling(id);
+          updateJob(id, { finished: true, error: "태스크가 실패했습니다." });
         }
       } catch (err) {
         console.error(err);
-        stopPolling();
-        setIsGenerating(false);
-        setError(err instanceof Error ? err.message : "알 수 없는 오류입니다.");
+        if (!pollTimersRef.current.has(id)) return;
+        stopPolling(id);
+        updateJob(id, {
+          finished: true,
+          error: err instanceof Error ? err.message : "알 수 없는 오류입니다.",
+        });
       }
     };
 
-    poll(); // 즉시 1회 조회 후 주기 폴링 시작
-    pollTimerRef.current = window.setInterval(poll, POLL_INTERVAL_MS);
+    pollTimersRef.current.set(id, window.setInterval(poll, POLL_INTERVAL_MS));
+    poll(); // 즉시 1회 조회 후 주기 폴링
   };
 
   // 좁은 화면에서는 결과 영역이 폼 아래에 있으므로 시작 시 보이는 위치로 옮긴다.
@@ -314,82 +369,148 @@ const App: React.FC = () => {
     }
   };
 
+  // 한 줄에 프롬프트 하나씩. 빈 줄은 건너뛴다.
+  const promptLines = prompt
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (isGenerating) return;
+    if (isSubmitting) return;
 
-    if (!prompt.trim()) {
+    if (promptLines.length === 0) {
       setError("prompt를 입력하세요.");
       return;
     }
+    if (promptLines.length > MAX_PROMPTS_PER_SUBMIT) {
+      setError(`프롬프트는 한 번에 최대 ${MAX_PROMPTS_PER_SUBMIT}개까지 입력할 수 있어요.`);
+      return;
+    }
+    if (promptLines.some((line) => line.length > MAX_PROMPT_LENGTH)) {
+      setError(`프롬프트 한 줄은 최대 ${MAX_PROMPT_LENGTH}자까지 입력할 수 있어요.`);
+      return;
+    }
+    if (!width || !height || !numSteps || !seed) {
+      setError("가로, 세로, 추론 스텝, 시드를 모두 입력하세요.");
+      return;
+    }
+
+    const widthValue = Number(width);
+    const heightValue = Number(height);
+    const stepsValue = Number(numSteps);
+    const seedValue = Number(seed);
+    const ratio = widthValue > 0 && heightValue > 0 ? widthValue / heightValue : 1;
 
     setError(null);
-    setImageUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return null;
-    });
-    setTaskStatus("");
-    setCurrentStep(0);
-    setTotalSteps(numSteps);
-    setPreviewRatio(width / height);
+    setIsSubmitting(true);
 
     try {
-      const payload: GenerateRequest = {
-        prompt,
-        height,
-        width,
-        num_inference_steps: numSteps,
-        seed,
-        precision,
-      };
+      // 거의 동시에 큐에 들어가야 백엔드가 한 배치로 묶어 인코딩할 수 있다.
+      const results = await Promise.allSettled(
+        promptLines.map((line) =>
+          requestGenerate({
+            prompt: line,
+            height: heightValue,
+            width: widthValue,
+            num_inference_steps: stepsValue,
+            seed: seedValue,
+            precision,
+          }),
+        ),
+      );
 
-      const res = await fetch(`/api/v1/generate`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+      const created: Job[] = [];
+      const failedLines: string[] = [];
+      let firstError: string | null = null;
+
+      results.forEach((result, i) => {
+        if (result.status === "fulfilled") {
+          created.push({
+            id: result.value.task_id,
+            prompt: promptLines[i],
+            status: result.value.status,
+            currentStep: 0,
+            totalSteps: stepsValue,
+            imageUrl: null,
+            error: null,
+            finished: false,
+            ratio,
+          });
+        } else {
+          console.error(result.reason);
+          failedLines.push(promptLines[i]);
+          firstError ??= result.reason instanceof Error ? result.reason.message : "알 수 없는 오류입니다.";
+        }
       });
 
-      if (!res.ok) {
-        throw new Error(await readErrorMessage(res, `이미지 생성 요청 실패: ${res.status}`));
+      if (created.length > 0) {
+        setJobs((prev) => [...created, ...prev]);
+        setSelectedId(created[0].id);
+        created.forEach((job) => startPolling(job.id));
+        revealStage();
       }
 
-      const data = await res.json();
-      setTaskId(data.task_id);
-      setTaskStatus(data.status);
-      setIsGenerating(true);
-
-      startPolling(data.task_id);
-      revealStage();
-    } catch (err) {
-      console.error(err);
-      setError(err instanceof Error ? err.message : "알 수 없는 오류입니다.");
-      setIsGenerating(false);
+      if (failedLines.length > 0) {
+        // 실패한 줄만 남겨 두면 그대로 다시 제출할 수 있다.
+        setPrompt(failedLines.join("\n"));
+        setError(
+          created.length > 0
+            ? `${promptLines.length}개 중 ${failedLines.length}개 요청 실패: ${firstError}`
+            : firstError,
+        );
+      }
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
   // 입력한 task_id로 진행 상황을 조회하고, 완료 상태면 이어서 폴링한다.
-  const handleLookup = async (e: React.FormEvent) => {
+  const handleLookup = (e: React.FormEvent) => {
     e.preventDefault();
 
-    if (!lookupTaskId.trim()) {
+    const id = lookupTaskId.trim();
+    if (!id) {
       setError("조회할 task_id를 입력하세요.");
       return;
     }
 
-    // 이전 작업의 상태·진행률·이미지가 남아 새 조회 결과와 섞여 보이지 않도록 초기화
     setError(null);
-    setTaskStatus("");
-    setCurrentStep(0);
-    setTotalSteps(0);
-    setImageUrl((prev) => {
-      if (prev) URL.revokeObjectURL(prev);
-      return null;
-    });
-    setTaskId(lookupTaskId.trim());
-    setIsGenerating(true);
-    startPolling(lookupTaskId.trim());
+
+    // 목록에 이미 있는 작업이면 새로 만들지 않고 선택만 한다.
+    if (jobsRef.current.some((job) => job.id === id)) {
+      setSelectedId(id);
+      revealStage();
+      return;
+    }
+
+    const job: Job = {
+      id,
+      status: "",
+      currentStep: 0,
+      totalSteps: 0,
+      imageUrl: null,
+      error: null,
+      finished: false,
+      ratio: 1,
+    };
+    setJobs((prev) => [job, ...prev]);
+    setSelectedId(id);
+    startPolling(id);
     revealStage();
+  };
+
+  const removeJobs = (ids: Set<string>) => {
+    ids.forEach(stopPolling);
+    const remaining = jobs.filter((job) => !ids.has(job.id));
+    jobs.forEach((job) => {
+      if (ids.has(job.id) && job.imageUrl) URL.revokeObjectURL(job.imageUrl);
+    });
+    setJobs(remaining);
+    if (selectedId && ids.has(selectedId)) {
+      setSelectedId(remaining[0]?.id ?? null);
+    }
   };
 
   const handlePromptKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -399,9 +520,12 @@ const App: React.FC = () => {
     }
   };
 
+  const selected = jobs.find((job) => job.id === selectedId) ?? null;
+
   const handleCopyTaskId = async () => {
+    if (!selected) return;
     try {
-      await navigator.clipboard.writeText(taskId);
+      await navigator.clipboard.writeText(selected.id);
       setCopied(true);
       window.setTimeout(() => setCopied(false), 1500);
     } catch {
@@ -409,14 +533,22 @@ const App: React.FC = () => {
     }
   };
 
-  const progressPercent =
-    totalSteps > 0 ? Math.min(100, Math.round((currentStep / totalSteps) * 100)) : 0;
+  const closeError = () => {
+    setError(null);
+    if (selected?.error) updateJob(selected.id, { error: null });
+  };
 
-  const statusLabel = STATUS_LABELS[taskStatus] ?? taskStatus;
-  const isFailed = taskStatus === "failed";
-  const isCompleted = taskStatus === "completed";
-  const isBusy = isGenerating && !imageUrl;
-  const stepsFill = `${((numSteps - 1) / (MAX_STEPS - 1)) * 100}%`;
+  const progressPercent = selected ? percentOf(selected) : 0;
+  const selectedStatus = selected?.status ?? "";
+  const statusLabel = STATUS_LABELS[selectedStatus] ?? selectedStatus;
+  const isFailed = selectedStatus === "failed";
+  const isCompleted = selectedStatus === "completed";
+  const isBusy = selected !== null && !selected.finished;
+  const shownError = error ?? selected?.error ?? null;
+  const hasFinishedJobs = jobs.some((job) => job.finished);
+  const sliderSteps = Math.min(Math.max(Number(numSteps) || 1, 1), MAX_STEPS);
+  const stepsFill = `${((sliderSteps - 1) / (MAX_STEPS - 1)) * 100}%`;
+  const previewRatio = selected?.ratio ?? 1;
 
   return (
     <div className="app">
@@ -450,7 +582,8 @@ const App: React.FC = () => {
                   프롬프트
                 </label>
                 <span className="hint">
-                  {prompt.length} / {MAX_PROMPT_LENGTH}
+                  {promptLines.length > 1 ? `${promptLines.length}개 · ` : ""}
+                  {prompt.length}자
                 </span>
               </div>
               <textarea
@@ -459,9 +592,9 @@ const App: React.FC = () => {
                 value={prompt}
                 onChange={(e) => setPrompt(e.target.value)}
                 onKeyDown={handlePromptKeyDown}
-                maxLength={MAX_PROMPT_LENGTH}
-                placeholder="만들고 싶은 이미지를 자세히 설명해 주세요. 예) 노을 지는 바닷가의 작은 등대, 수채화 스타일"
+                placeholder={"한 줄에 프롬프트 하나씩 입력하면 여러 장을 한 번에 생성해요.\n예) 노을 지는 바닷가의 작은 등대, 수채화 스타일\n우주복을 입은 고양이"}
               />
+              <span className="hint">줄바꿈은 Enter, 생성은 ⌘/Ctrl + Enter</span>
             </div>
 
             <div className="field">
@@ -476,10 +609,10 @@ const App: React.FC = () => {
                       key={p.label}
                       type="button"
                       className="ratio"
-                      aria-pressed={width === p.width && height === p.height}
+                      aria-pressed={width === String(p.width) && height === String(p.height)}
                       onClick={() => {
-                        setWidth(p.width);
-                        setHeight(p.height);
+                        setWidth(String(p.width));
+                        setHeight(String(p.height));
                       }}
                     >
                       <span className="ratio-box">
@@ -494,26 +627,24 @@ const App: React.FC = () => {
                 <div className="with-suffix">
                   <input
                     className="input"
-                    type="number"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="off"
                     aria-label="가로(px)"
-                    min={MIN_IMAGE_SIZE}
-                    max={MAX_IMAGE_SIZE}
-                    step={IMAGE_SIZE_STEP}
                     value={width}
-                    onChange={(e) => setWidth(Number(e.target.value))}
+                    onChange={(e) => setWidth(digitsOnly(e.target.value))}
                   />
                   <span className="suffix">W</span>
                 </div>
                 <div className="with-suffix">
                   <input
                     className="input"
-                    type="number"
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="off"
                     aria-label="세로(px)"
-                    min={MIN_IMAGE_SIZE}
-                    max={MAX_IMAGE_SIZE}
-                    step={IMAGE_SIZE_STEP}
                     value={height}
-                    onChange={(e) => setHeight(Number(e.target.value))}
+                    onChange={(e) => setHeight(digitsOnly(e.target.value))}
                   />
                   <span className="suffix">H</span>
                 </div>
@@ -530,12 +661,12 @@ const App: React.FC = () => {
                 </label>
                 <input
                   className="input steps-value"
-                  type="number"
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="off"
                   aria-label="추론 스텝 수"
-                  min={1}
-                  max={MAX_STEPS}
                   value={numSteps}
-                  onChange={(e) => setNumSteps(Number(e.target.value))}
+                  onChange={(e) => setNumSteps(digitsOnly(e.target.value))}
                   style={{ width: 72, padding: "5px 8px", textAlign: "center" }}
                 />
               </div>
@@ -545,8 +676,8 @@ const App: React.FC = () => {
                 type="range"
                 min={1}
                 max={MAX_STEPS}
-                value={Math.min(Math.max(numSteps, 1), MAX_STEPS)}
-                onChange={(e) => setNumSteps(Number(e.target.value))}
+                value={sliderSteps}
+                onChange={(e) => setNumSteps(e.target.value)}
                 style={{ "--fill": stepsFill } as React.CSSProperties}
               />
             </div>
@@ -559,15 +690,16 @@ const App: React.FC = () => {
                 <input
                   id="seed"
                   className="input"
-                  type="number"
-                  min={0}
+                  type="text"
+                  inputMode="numeric"
+                  autoComplete="off"
                   value={seed}
-                  onChange={(e) => setSeed(Number(e.target.value))}
+                  onChange={(e) => setSeed(digitsOnly(e.target.value))}
                 />
                 <button
                   type="button"
                   className="btn btn-icon"
-                  onClick={() => setSeed(Math.floor(Math.random() * MAX_SEED))}
+                  onClick={() => setSeed(String(Math.floor(Math.random() * MAX_SEED)))}
                   aria-label="랜덤 시드"
                   title="랜덤 시드"
                 >
@@ -594,16 +726,16 @@ const App: React.FC = () => {
               </div>
             </div>
 
-            <button type="submit" className="btn btn-primary" disabled={isGenerating}>
-              {isGenerating ? (
+            <button type="submit" className="btn btn-primary" disabled={isSubmitting}>
+              {isSubmitting ? (
                 <>
                   <span className="spinner" aria-hidden="true" />
-                  생성 중...
+                  요청 중...
                 </>
               ) : (
                 <>
                   <SparklesIcon size={18} />
-                  이미지 생성
+                  {promptLines.length > 1 ? `이미지 ${promptLines.length}장 생성` : "이미지 생성"}
                 </>
               )}
             </button>
@@ -628,11 +760,11 @@ const App: React.FC = () => {
         </aside>
 
         <section className="stage" ref={stageRef} aria-live="polite">
-          {error && (
+          {shownError && (
             <div className="alert" role="alert">
               <AlertIcon />
-              <span className="alert-text">{error}</span>
-              <button type="button" className="alert-close" onClick={() => setError(null)} aria-label="오류 닫기">
+              <span className="alert-text">{shownError}</span>
+              <button type="button" className="alert-close" onClick={closeError} aria-label="오류 닫기">
                 <CloseIcon />
               </button>
             </div>
@@ -646,15 +778,16 @@ const App: React.FC = () => {
                 width: `min(100%, calc(72vh * ${previewRatio}))`,
               }}
             >
-              {imageUrl ? (
+              {selected?.imageUrl ? (
                 <img
+                  key={selected.id}
                   className="preview-img"
-                  src={imageUrl}
+                  src={selected.imageUrl}
                   alt="생성된 이미지"
                   onLoad={(e) => {
                     const { naturalWidth, naturalHeight } = e.currentTarget;
                     if (naturalWidth > 0 && naturalHeight > 0) {
-                      setPreviewRatio(naturalWidth / naturalHeight);
+                      updateJob(selected.id, { ratio: naturalWidth / naturalHeight });
                     }
                   }}
                 />
@@ -662,7 +795,9 @@ const App: React.FC = () => {
                 <div className="preview-busy">
                   <span className="busy-percent">{progressPercent}%</span>
                   <span className="busy-label">
-                    {totalSteps > 0 ? `${currentStep} / ${totalSteps} 스텝` : "대기 중..."}
+                    {selected.status === "queued" || selected.totalSteps === 0
+                      ? "대기 중..."
+                      : `${selected.currentStep} / ${selected.totalSteps} 스텝`}
                   </span>
                 </div>
               ) : (
@@ -670,7 +805,9 @@ const App: React.FC = () => {
                   <div className="empty-icon">
                     <ImageIcon />
                   </div>
-                  <p className="empty-title">아직 생성된 이미지가 없어요</p>
+                  <p className="empty-title">
+                    {selected ? "표시할 이미지가 없어요" : "아직 생성된 이미지가 없어요"}
+                  </p>
                   <p className="empty-desc">
                     프롬프트를 입력하고 생성 버튼을 누르거나, task_id로 이전 작업을 조회해 보세요.
                   </p>
@@ -678,10 +815,10 @@ const App: React.FC = () => {
               )}
             </div>
 
-            {imageUrl && (
+            {selected?.imageUrl && (
               <div className="preview-actions">
-                <span className="preview-meta">{taskId}</span>
-                <a className="btn btn-sm" href={imageUrl} download={`${taskId}.png`}>
+                <span className="preview-meta">{selected.id}</span>
+                <a className="btn btn-sm" href={selected.imageUrl} download={`${selected.id}.png`}>
                   <DownloadIcon />
                   PNG 다운로드
                 </a>
@@ -691,12 +828,13 @@ const App: React.FC = () => {
 
           <div className="card task-card">
             <h2 className="section-title">작업 상태</h2>
-            {taskId.length > 0 ? (
+            {selected ? (
               <>
+                {selected.prompt && <p className="task-prompt">{selected.prompt}</p>}
                 <div className="task-head">
                   <div className="task-id">
-                    <span className="task-id-text" title={taskId}>
-                      {taskId}
+                    <span className="task-id-text" title={selected.id}>
+                      {selected.id}
                     </span>
                     <button
                       type="button"
@@ -708,8 +846,8 @@ const App: React.FC = () => {
                       {copied ? <CheckIcon /> : <CopyIcon />}
                     </button>
                   </div>
-                  {taskStatus.length > 0 && (
-                    <span className={`badge badge-${taskStatus}`}>{statusLabel}</span>
+                  {selectedStatus.length > 0 && (
+                    <span className={`badge badge-${selectedStatus}`}>{statusLabel}</span>
                   )}
                 </div>
                 <div
@@ -725,7 +863,9 @@ const App: React.FC = () => {
                   />
                 </div>
                 <div className="progress-meta">
-                  <span>{totalSteps > 0 ? `${currentStep} / ${totalSteps} 스텝` : "대기 중..."}</span>
+                  <span>
+                    {selected.totalSteps > 0 ? `${selected.currentStep} / ${selected.totalSteps} 스텝` : "대기 중..."}
+                  </span>
                   <span>{progressPercent}%</span>
                 </div>
               </>
@@ -733,6 +873,65 @@ const App: React.FC = () => {
               <p className="task-empty">태스크가 조회되지 않았어요.</p>
             )}
           </div>
+
+          {jobs.length > 0 && (
+            <div className="card task-card">
+              <div className="list-head">
+                <h2 className="section-title">작업 목록 ({jobs.length})</h2>
+                {hasFinishedJobs && (
+                  <button
+                    type="button"
+                    className="btn btn-sm"
+                    onClick={() => removeJobs(new Set(jobs.filter((job) => job.finished).map((job) => job.id)))}
+                  >
+                    완료 항목 지우기
+                  </button>
+                )}
+              </div>
+              <ul className="job-list">
+                {jobs.map((job) => {
+                  const percent = percentOf(job);
+                  const label = STATUS_LABELS[job.status] ?? job.status;
+                  return (
+                    <li key={job.id} className={`job${job.id === selectedId ? " is-selected" : ""}`}>
+                      <button
+                        type="button"
+                        className="job-main"
+                        onClick={() => setSelectedId(job.id)}
+                        aria-current={job.id === selectedId}
+                      >
+                        <span className="job-thumb">
+                          {job.imageUrl ? (
+                            <img src={job.imageUrl} alt="" />
+                          ) : job.finished ? (
+                            <ImageIcon size={18} />
+                          ) : (
+                            <span className="job-spin" aria-hidden="true" />
+                          )}
+                        </span>
+                        <span className="job-body">
+                          <span className={`job-title${job.prompt ? "" : " is-mono"}`}>{job.prompt ?? job.id}</span>
+                          <span className="job-sub">
+                            {job.status && <span className={`badge badge-${job.status}`}>{label}</span>}
+                            <span>{percent}%</span>
+                          </span>
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        className="job-remove"
+                        onClick={() => removeJobs(new Set([job.id]))}
+                        aria-label="목록에서 제거"
+                        title="목록에서 제거"
+                      >
+                        <CloseIcon size={14} />
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
         </section>
       </main>
     </div>
