@@ -46,6 +46,12 @@ hf download Qwen/Qwen-Image-2.1 --local-dir model/Qwen-Image-2.1
 ```
 > 24GB 통합 메모리에서는 텍스트 인코더(약 16GB)와 DiT(약 14GB)를 동시에 올릴 수 없어,
 > 요청마다 `인코더 로딩 → 임베딩 → 해제 → DiT 로딩 → 생성` 순으로 처리합니다. (`backend/app/utils/model_manager.py`)
+> 대기 중인 요청은 워커가 묶어서 처리하므로 인코더/DiT 로딩은 배치당 한 번씩만 일어납니다. (`backend/app/utils/job_queue.py`)
+
+**정밀도 선택 (`precision`)**: `POST /api/v1/generate`의 `precision`으로 DiT 가중치 정밀도를 고를 수 있습니다 (웹 UI에도 선택 항목이 있습니다).
+- `bf16` (기본): 원본 가중치, DiT 약 14GB
+- `int8`: 로딩 시 Linear 가중치를 출력 채널별 int8로 양자화(약 7GB), 계산은 bf16. 모델 파일은 그대로 쓰며 별도 변환이 필요 없습니다.
+- 24GB 메모리에서 768×768 이상은 bf16이 스왑으로 매우 느려질 수 있어 int8을 권장합니다. 512×512에서는 속도 차이가 작습니다.
 
 ### 1) Backend
 ```bash

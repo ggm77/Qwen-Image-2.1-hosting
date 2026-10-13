@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel
 
 class GenerateRequest(BaseModel):
@@ -6,6 +8,7 @@ class GenerateRequest(BaseModel):
     width: int = 768
     num_inference_steps: int = 20
     seed: int = 42
+    precision: Literal["bf16", "int8"] = "bf16"  # DiT 가중치 정밀도
 
 class GenerateResponse(BaseModel):
     task_id: str
@@ -15,3 +18,4 @@ class GenerateResponse(BaseModel):
     width: int
     num_inference_steps: int
     seed: int
+    precision: str

@@ -9,8 +9,8 @@ from app.utils.pipeline_runner import GenerationJob, generate_image, mark_failed
 # 이미지 생성 요청을 큐에 쌓고, 워커 스레드 하나가 묶어서 처리한다.
 # 대기 중인 요청이 여러 개면
 #   1) 텍스트 인코더를 한 번만 올려 모든 프롬프트를 임베딩하고
-#   2) DiT/VAE를 한 번만 올려 모든 이미지를 생성한다.
-# 생성 도중 들어온 요청 중 프롬프트 임베딩이 캐시에 있는 것은 DiT를 내리지 않고 이어서 처리한다.
+#   2) DiT/VAE를 정밀도(bf16/int8)별로 한 번씩만 올려 해당 이미지를 모두 생성한다.
+# 생성 도중 들어온 요청 중 같은 정밀도이고 프롬프트 임베딩이 캐시에 있는 것은 DiT를 내리지 않고 이어서 처리한다.
 # 워커가 하나뿐이라 동시에 생성되는 이미지는 항상 1개다.
 class GenerationWorker:
 
@@ -66,7 +66,7 @@ class GenerationWorker:
         mm = self.model_manager
         logger.info(f"[Qwen] 배치 처리 시작 (요청 {len(batch)}개)")
 
-        # 1단계: 프롬프트 임베딩 (캐시에 없는 프롬프트가 있을 때만 인코더 로딩)
+        # 1단계: 프롬프트 임베딩 (캐시에 없는 프롬프트가 있을 때만 인코더 로딩, 정밀도와 무관)
         try:
             embeds = mm.encode_prompts([job.prompt for job in batch])
         except Exception as ex:
@@ -75,17 +75,32 @@ class GenerationWorker:
                 mark_failed(job.task_id)
             return
 
-        # 2단계: DiT + VAE를 한 번 올려 배치 전체 생성
+        # 2단계: DiT는 정밀도별로 하나만 올릴 수 있으므로 정밀도별로 묶어 처리 (먼저 들어온 요청의 정밀도 순)
+        groups: dict[str, list[GenerationJob]] = {}
+        for job in batch:
+            groups.setdefault(job.precision, []).append(job)
+
+        for precision, jobs in groups.items():
+            self._run_group(precision, jobs, embeds)
+
+    def _run_group(
+        self,
+        precision: str,
+        jobs: list[GenerationJob],
+        embeds: dict[str, PromptEmbeds],
+    ):
+        mm = self.model_manager
+
         try:
-            pipe = mm.load_generator()
+            pipe = mm.load_generator(precision)
         except Exception as ex:
-            logger.error(f"[Qwen] 생성 모델 로딩 실패: {ex}")
-            for job in batch:
+            logger.error(f"[Qwen] 생성 모델 로딩 실패 (precision={precision}): {ex}")
+            for job in jobs:
                 mark_failed(job.task_id)
             return
 
         pending: deque[tuple[GenerationJob, PromptEmbeds]] = deque(
-            (job, embeds[job.prompt]) for job in batch
+            (job, embeds[job.prompt]) for job in jobs
         )
         try:
             while pending:
@@ -93,16 +108,24 @@ class GenerationWorker:
                 generate_image(job, pipe, prompt_embeds, prompt_embeds_mask, self.device)
 
                 if not pending:
-                    pending.extend(self._take_cached())
+                    pending.extend(self._take_cached(precision))
+        except Exception as ex:
+            # 처리하지 못한 요청이 queued/processing으로 남지 않도록 실패 처리 (완료된 작업은 유지됨)
+            logger.error(f"[Qwen] 그룹 처리 중 오류 (precision={precision}): {ex}")
+            for job, _ in pending:
+                mark_failed(job.task_id)
         finally:
             del pipe
             mm.free_memory()
 
-    def _take_cached(self) -> list[tuple[GenerationJob, PromptEmbeds]]:
-        """생성 중 새로 들어온 요청 중 임베딩이 캐시에 있는 것만 가져오고, 나머지는 다음 배치로 넘긴다."""
+    def _take_cached(self, precision: str) -> list[tuple[GenerationJob, PromptEmbeds]]:
+        """
+        생성 중 새로 들어온 요청 중 지금 올라간 DiT와 같은 정밀도이고 임베딩이 캐시에 있는 것만 가져온다.
+        나머지는 다음 배치로 넘긴다.
+        """
         ready = []
         for job in self._drain():
-            cached = self.model_manager.get_cached(job.prompt)
+            cached = self.model_manager.get_cached(job.prompt) if job.precision == precision else None
             if cached is not None:
                 ready.append((job, cached))
             else:

@@ -1,12 +1,15 @@
 // src/App.tsx
 import React, { useState, useEffect, useRef } from "react";
 
+type Precision = "bf16" | "int8";
+
 type GenerateRequest = {
   prompt: string;
   height: number;
   width: number;
   num_inference_steps: number;
   seed: number;
+  precision: Precision;
 };
 
 type TaskStatus = {
@@ -25,6 +28,7 @@ const App: React.FC = () => {
   const [width, setWidth] = useState(768);
   const [numSteps, setNumSteps] = useState(20);
   const [seed, setSeed] = useState(42);
+  const [precision, setPrecision] = useState<Precision>("bf16");
 
   const [taskId, setTaskId] = useState("");
   const [lookupTaskId, setLookupTaskId] = useState("");
@@ -138,6 +142,7 @@ const App: React.FC = () => {
         width,
         num_inference_steps: numSteps,
         seed,
+        precision,
       };
 
       const res = await fetch(`/api/v1/generate`, {
@@ -215,6 +220,14 @@ const App: React.FC = () => {
         <label>
           Seed
           <input type="number" value={seed} onChange={(e) => setSeed(Number(e.target.value))} />
+        </label>
+
+        <label>
+          Precision
+          <select value={precision} onChange={(e) => setPrecision(e.target.value as Precision)}>
+            <option value="bf16">bf16 (원본, 메모리 많이 사용 · 느림)</option>
+            <option value="int8">int8 (가중치 양자화, 메모리 절약 · 더 빠름)</option>
+          </select>
         </label>
 
         <button type="submit" disabled={isGenerating}>

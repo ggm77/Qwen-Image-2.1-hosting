@@ -22,8 +22,8 @@ class GenerateService:
             conn.execute(
             """
             INSERT INTO tasks (
-                    task_id, prompt, status, seed, height, width, num_inference_steps
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    task_id, prompt, status, seed, height, width, num_inference_steps, precision
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -33,6 +33,7 @@ class GenerateService:
                 generate_request.height,
                 generate_request.width,
                 generate_request.num_inference_steps,
+                generate_request.precision,
             )
             )
             conn.commit()
@@ -46,6 +47,7 @@ class GenerateService:
                 width=generate_request.width,
                 num_inference_steps=generate_request.num_inference_steps,
                 seed=generate_request.seed,
+                precision=generate_request.precision,
             )
         )
 
@@ -59,4 +61,5 @@ class GenerateService:
             width=generate_request.width,
             num_inference_steps=generate_request.num_inference_steps,
             seed=generate_request.seed,
+            precision=generate_request.precision,
         )

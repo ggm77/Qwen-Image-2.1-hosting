@@ -7,11 +7,15 @@ from diffusers import QwenImage21Pipeline
 
 from app.core.logger import logger
 from app.core.config import settings
+from app.utils.quantization import quantize_linears
 
 # 프롬프트 임베딩 캐시 최대 개수 (임베딩은 CPU 메모리에 보관, 하나당 수 MB~수십 MB)
 PROMPT_CACHE_SIZE = 32
 
 PromptEmbeds = tuple[torch.Tensor, torch.Tensor | None]
+
+# DiT 가중치 정밀도: bf16(원본, 약 14GB) / int8(가중치 8비트 양자화, 약 7GB)
+PRECISIONS = ("bf16", "int8")
 
 # Qwen-Image 2.1은 텍스트 인코더(Qwen3-VL 8B, 약 16GB)와 DiT(7B, 약 14GB)가 커서
 # 24GB 통합 메모리에서는 동시에 올릴 수 없다.
@@ -90,11 +94,21 @@ class ModelManager:
 
             return results
 
-    def load_generator(self) -> QwenImage21Pipeline:
-        """DiT + VAE만 로딩한다 (텍스트 인코더 없음)."""
-        logger.info("[Qwen] DiT/VAE 로딩...")
-        return QwenImage21Pipeline.from_pretrained(
+    def load_generator(self, precision: str = "bf16") -> QwenImage21Pipeline:
+        """DiT + VAE만 로딩한다 (텍스트 인코더 없음). int8이면 로딩 후 Linear를 양자화한다."""
+        if precision not in PRECISIONS:
+            raise ValueError(f"지원하지 않는 precision: {precision}")
+
+        logger.info(f"[Qwen] DiT/VAE 로딩... (precision={precision})")
+        pipe = QwenImage21Pipeline.from_pretrained(
             settings.MODEL_PATH,
             text_encoder=None,  # 프로세서(토크나이저)는 파이프라인 초기화에 필요하므로 유지
             torch_dtype=self.dtype,
-        ).to(self.device)
+        )  # CPU에 로딩
+
+        if precision == "int8":
+            count = quantize_linears(pipe.transformer, self.dtype)
+            gc.collect()
+            logger.info(f"[Qwen] DiT int8 양자화 완료 (Linear {count}개)")
+
+        return pipe.to(self.device)

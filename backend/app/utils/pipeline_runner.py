@@ -17,6 +17,7 @@ class GenerationJob:
     width: int
     num_inference_steps: int
     seed: int
+    precision: str = "bf16"
 
 # 작업 실패 처리
 def mark_failed(task_id: str):
