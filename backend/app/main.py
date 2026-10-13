@@ -9,9 +9,10 @@ from app.core.logger import logger
 from app.core.middleware import setup_cors
 from app.api.v1.endpoints.generate.generate import router as generate_router
 from app.api.v1.endpoints.tasks.task import router as tasks_router
-from app.db.session import init_db
+from app.db.session import init_db, recover_interrupted_tasks
 from app.utils.model_manager import ModelManager
 from app.utils.job_queue import GenerationWorker
+from app.utils.pipeline_runner import GenerationJob
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -41,6 +42,17 @@ async def lifespan(app: FastAPI):
     app.state.device = device
     # 워커 스레드 1개가 큐의 요청을 묶어서 처리 (동시 생성 1개로 제한)
     app.state.generation_worker = GenerationWorker(app.state.model_manager, device)
+    # 이전 실행이 중단된 흔적 정리: 처리 중이던 작업은 실패 처리, 대기 중이던 작업은 다시 큐에 넣는다
+    # (워커 시작 전에 모두 넣어서 한 배치로 묶어 처리되게 한다)
+    interrupted, requeued = recover_interrupted_tasks()
+    for row in requeued:
+        app.state.generation_worker.submit(GenerationJob(
+            task_id=row["task_id"], prompt=row["prompt"], height=row["height"], width=row["width"],
+            num_inference_steps=row["num_inference_steps"], seed=row["seed"], precision=row["precision"],
+        ))
+    if interrupted or requeued:
+        logger.info(f"이전 실행에서 중단된 작업 정리: 실패 처리 {interrupted}개, 다시 큐에 등록 {len(requeued)}개")
+
     app.state.generation_worker.start()
     logger.info("Qwen-Image-2.1 ModelManager 준비 완료")
 

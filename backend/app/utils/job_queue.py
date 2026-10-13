@@ -4,7 +4,7 @@ from collections import deque
 
 from app.core.logger import logger
 from app.utils.model_manager import ModelManager, PromptEmbeds
-from app.utils.pipeline_runner import GenerationJob, generate_image, mark_failed
+from app.utils.pipeline_runner import GenerationInterrupted, GenerationJob, generate_image, mark_failed
 
 # 이미지 생성 요청을 큐에 쌓고, 워커 스레드 하나가 묶어서 처리한다.
 # 대기 중인 요청이 여러 개면
@@ -19,13 +19,19 @@ class GenerationWorker:
         self.device = device
         self._queue: queue.Queue[GenerationJob | None] = queue.Queue()
         self._deferred: list[GenerationJob] = []  # 캐시 미스라 다음 배치로 넘긴 요청
+        self._stop_event = threading.Event()
         self._thread = threading.Thread(target=self._loop, name="generation-worker", daemon=True)
 
     def start(self):
         self._thread.start()
 
     def stop(self):
-        self._queue.put(None)
+        """
+        워커를 멈춘다. 대기 중인 요청은 처리하지 않고 DB에 queued로 남겨 다음 시작 때 다시 처리한다.
+        생성 중인 이미지는 다음 스텝에서 중단되고 queued로 되돌아간다 (인코더 로딩 중이면 그 단계가 끝난 뒤 멈춘다).
+        """
+        self._stop_event.set()
+        self._queue.put(None)  # get()에서 대기 중인 워커를 깨운다
         self._thread.join()
 
     def submit(self, job: GenerationJob):
@@ -50,7 +56,7 @@ class GenerationWorker:
                 batch, self._deferred = self._deferred, []
             else:
                 first = self._queue.get()  # 요청이 올 때까지 대기
-                if first is None:
+                if first is None or self._stop_event.is_set():
                     return
                 batch = [first]
             batch += self._drain()
@@ -64,6 +70,8 @@ class GenerationWorker:
 
     def _process(self, batch: list[GenerationJob]):
         mm = self.model_manager
+        if self._stop_event.is_set():
+            return
         logger.info(f"[Qwen] 배치 처리 시작 (요청 {len(batch)}개)")
 
         # 1단계: 프롬프트 임베딩 (캐시에 없는 프롬프트가 있을 때만 인코더 로딩, 정밀도와 무관)
@@ -81,6 +89,8 @@ class GenerationWorker:
             groups.setdefault(job.precision, []).append(job)
 
         for precision, jobs in groups.items():
+            if self._stop_event.is_set():
+                return
             self._run_group(precision, jobs, embeds)
 
     def _run_group(
@@ -103,12 +113,17 @@ class GenerationWorker:
             (job, embeds[job.prompt]) for job in jobs
         )
         try:
-            while pending:
+            while pending and not self._stop_event.is_set():
                 job, (prompt_embeds, prompt_embeds_mask) = pending.popleft()
-                generate_image(job, pipe, prompt_embeds, prompt_embeds_mask, self.device)
+                generate_image(
+                    job, pipe, prompt_embeds, prompt_embeds_mask, self.device,
+                    should_stop=self._stop_event.is_set,
+                )
 
                 if not pending:
                     pending.extend(self._take_cached(precision))
+        except GenerationInterrupted:
+            logger.info("[Qwen] 서버 종료로 생성을 중단했습니다 (남은 작업은 다음 시작 때 이어서 처리)")
         except Exception as ex:
             # 처리하지 못한 요청이 queued/processing으로 남지 않도록 실패 처리 (완료된 작업은 유지됨)
             logger.error(f"[Qwen] 그룹 처리 중 오류 (precision={precision}): {ex}")

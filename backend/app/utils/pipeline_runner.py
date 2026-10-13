@@ -9,6 +9,9 @@ from app.core.logger import logger
 from app.db.session import get_db_connection
 from app.core.config import settings
 
+class GenerationInterrupted(Exception):
+    """서버 종료 때문에 생성을 중단할 때 사용한다. 작업은 queued로 되돌아가 다음 시작 때 다시 처리된다."""
+
 @dataclass
 class GenerationJob:
     task_id: str
@@ -35,6 +38,7 @@ def generate_image(
         prompt_embeds: torch.Tensor,
         prompt_embeds_mask: torch.Tensor | None,
         device: str,
+        should_stop=lambda: False,
 ):
     # DB 연결
     with get_db_connection() as conn:
@@ -53,6 +57,9 @@ def generate_image(
 
             # 이미지 생성 콜백 함수
             def on_step_end(pipeline, step_index, timestep, callback_kwargs):
+                if should_stop():
+                    raise GenerationInterrupted()
+
                 total = pipeline.num_timesteps
                 current_step = step_index + 1
                 progress = current_step / total * 100
@@ -99,6 +106,15 @@ def generate_image(
             # 로깅
             elapsed_time = time.perf_counter() - start_time
             logger.info(f"[Qwen] 이미지 생성 완료 ({elapsed_time:.2f}초 소요)")
+
+        except GenerationInterrupted:
+            # 서버 종료로 중단: 다음 시작 때 다시 처리되도록 queued로 되돌린다
+            conn.execute(
+                "UPDATE tasks SET status = ?, current_step = 0 WHERE task_id = ?",
+                ("queued", job.task_id)
+            )
+            conn.commit()
+            raise
 
         except Exception as ex:
             logger.error(f"[Qwen] 이미지 생성 중 오류 발생: {ex}")
