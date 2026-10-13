@@ -22,6 +22,32 @@ type TaskStatus = {
 
 const POLL_INTERVAL_MS = 1500;
 
+// 백엔드 요청 값 범위 (backend/app/schemas/generate/generate.py 와 맞출 것)
+const MIN_IMAGE_SIZE = 64;
+const MAX_IMAGE_SIZE = 1024;
+const IMAGE_SIZE_STEP = 32;
+const MAX_STEPS = 100;
+const MAX_PROMPT_LENGTH = 2000;
+
+type ValidationDetail = { loc?: (string | number)[]; msg: string };
+
+// 백엔드가 돌려준 오류 메시지(detail)를 읽는다. 없으면 fallback을 쓴다.
+const readErrorMessage = async (res: Response, fallback: string): Promise<string> => {
+  try {
+    const body = await res.json();
+    const detail: unknown = body?.detail;
+    if (typeof detail === "string") return detail;
+    if (Array.isArray(detail)) {
+      return (detail as ValidationDetail[])
+        .map((d) => `${d.loc?.[d.loc.length - 1] ?? "입력값"}: ${d.msg}`)
+        .join(", ");
+    }
+  } catch {
+    // JSON이 아닌 응답이면 fallback 사용
+  }
+  return fallback;
+};
+
 const App: React.FC = () => {
   const [prompt, setPrompt] = useState("");
   const [height, setHeight] = useState(768);
@@ -66,7 +92,7 @@ const App: React.FC = () => {
     try {
       const res = await fetch(`/api/v1/tasks/${id}/result`, { method: "GET" });
       if (!res.ok) {
-        throw new Error(`이미지 생성 결과 요청 실패: ${res.status}`);
+        throw new Error(await readErrorMessage(res, `이미지 생성 결과 요청 실패: ${res.status}`));
       }
 
       const blob = await res.blob();
@@ -90,7 +116,7 @@ const App: React.FC = () => {
       try {
         const res = await fetch(`/api/v1/tasks/${id}`, { method: "GET" });
         if (!res.ok) {
-          throw new Error(`태스크 상태 요청 실패: ${res.status}`);
+          throw new Error(await readErrorMessage(res, `태스크 상태 요청 실패: ${res.status}`));
         }
 
         const data: TaskStatus = await res.json();
@@ -132,6 +158,7 @@ const App: React.FC = () => {
       if (prev) URL.revokeObjectURL(prev);
       return null;
     });
+    setTaskStatus("");
     setCurrentStep(0);
     setTotalSteps(numSteps);
 
@@ -152,7 +179,7 @@ const App: React.FC = () => {
       });
 
       if (!res.ok) {
-        throw new Error(`이미지 생성 요청 실패: ${res.status}`);
+        throw new Error(await readErrorMessage(res, `이미지 생성 요청 실패: ${res.status}`));
       }
 
       const data = await res.json();
@@ -177,7 +204,15 @@ const App: React.FC = () => {
       return;
     }
 
+    // 이전 작업의 상태·진행률·이미지가 남아 새 조회 결과와 섞여 보이지 않도록 초기화
     setError(null);
+    setTaskStatus("");
+    setCurrentStep(0);
+    setTotalSteps(0);
+    setImageUrl((prev) => {
+      if (prev) URL.revokeObjectURL(prev);
+      return null;
+    });
     setTaskId(lookupTaskId.trim());
     setIsGenerating(true);
     startPolling(lookupTaskId.trim());
@@ -198,28 +233,29 @@ const App: React.FC = () => {
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             rows={3}
+            maxLength={MAX_PROMPT_LENGTH}
             style={{ width: "100%" }}
           />
         </label>
 
         <label>
           Height
-          <input type="number" value={height} onChange={(e) => setHeight(Number(e.target.value))} />
+          <input type="number" min={MIN_IMAGE_SIZE} max={MAX_IMAGE_SIZE} step={IMAGE_SIZE_STEP} value={height} onChange={(e) => setHeight(Number(e.target.value))} />
         </label>
 
         <label>
           Width
-          <input type="number" value={width} onChange={(e) => setWidth(Number(e.target.value))} />
+          <input type="number" min={MIN_IMAGE_SIZE} max={MAX_IMAGE_SIZE} step={IMAGE_SIZE_STEP} value={width} onChange={(e) => setWidth(Number(e.target.value))} />
         </label>
 
         <label>
           Num inference steps
-          <input type="number" value={numSteps} onChange={(e) => setNumSteps(Number(e.target.value))} />
+          <input type="number" min={1} max={MAX_STEPS} value={numSteps} onChange={(e) => setNumSteps(Number(e.target.value))} />
         </label>
 
         <label>
           Seed
-          <input type="number" value={seed} onChange={(e) => setSeed(Number(e.target.value))} />
+          <input type="number" min={0} value={seed} onChange={(e) => setSeed(Number(e.target.value))} />
         </label>
 
         <label>
