@@ -77,10 +77,23 @@ class TasksService:
                 raise HTTPException(status_code=400, detail="작업 결과를 찾을 수 없습니다.")
             
             task = dict(row)
-            file_path = settings.IMG_DIR + "/" + task["file_path"]
 
-            with open(file_path, "rb") as f:
-                image_bytes = f.read()
+            # 완료되지 않은 작업은 결과 파일이 없다
+            if task["status"] == "failed":
+                raise HTTPException(status_code=409, detail="작업이 실패해서 결과가 없습니다.")
+            if task["status"] != "completed":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"작업이 아직 완료되지 않았습니다. (상태: {task['status']})"
+                )
+
+            file_path = settings.IMG_DIR + "/" + (task["file_path"] or "")
+
+            try:
+                with open(file_path, "rb") as f:
+                    image_bytes = f.read()
+            except (FileNotFoundError, IsADirectoryError):
+                raise HTTPException(status_code=404, detail="결과 이미지 파일을 찾을 수 없습니다.")
 
             buf = BytesIO(image_bytes)
             buf.seek(0)
