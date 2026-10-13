@@ -2,7 +2,6 @@
 
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
-import threading
 
 import torch
 
@@ -12,6 +11,7 @@ from app.api.v1.endpoints.generate.generate import router as generate_router
 from app.api.v1.endpoints.tasks.task import router as tasks_router
 from app.db.session import init_db
 from app.utils.model_manager import ModelManager
+from app.utils.job_queue import GenerationWorker
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -39,13 +39,16 @@ async def lifespan(app: FastAPI):
     # 모델은 요청 시 단계별로 로딩한다 (메모리 절약, ModelManager 참고)
     app.state.model_manager = ModelManager(device)
     app.state.device = device
-    app.state.semaphore = threading.BoundedSemaphore(1) # 동시 생성 1개로 제한
+    # 워커 스레드 1개가 큐의 요청을 묶어서 처리 (동시 생성 1개로 제한)
+    app.state.generation_worker = GenerationWorker(app.state.model_manager, device)
+    app.state.generation_worker.start()
     logger.info("Qwen-Image-2.1 ModelManager 준비 완료")
 
     try:
         yield
     finally:
         logger.info("앱 종료 중: 자원 해제 중...")
+        app.state.generation_worker.stop()
         del app.state.model_manager
 
 app = FastAPI(lifespan=lifespan)

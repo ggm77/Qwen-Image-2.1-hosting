@@ -1,9 +1,9 @@
-from fastapi import Request, BackgroundTasks
+from fastapi import Request
 import uuid
 
 from app.schemas.generate.generate import GenerateRequest, GenerateResponse
 from app.db.session import get_db_connection
-from app.utils.pipeline_runner import run_pipeline
+from app.utils.pipeline_runner import GenerationJob
 from app.core.logger import logger
 
 class GenerateService:
@@ -11,7 +11,6 @@ class GenerateService:
     def request_generate(
             self,
             generate_request: GenerateRequest,
-            background_tasks: BackgroundTasks,
             request: Request
     ) -> GenerateResponse:
         
@@ -38,18 +37,16 @@ class GenerateService:
             )
             conn.commit()
 
-        # 백그라운드에서 이미지 생성 작업 실행
-        background_tasks.add_task(
-            run_pipeline,
-            task_id=task_id,
-            prompt=generate_request.prompt,
-            height=generate_request.height,
-            width=generate_request.width,
-            num_inference_steps=generate_request.num_inference_steps,
-            seed=generate_request.seed,
-            model_manager=request.app.state.model_manager,
-            device=request.app.state.device,
-            semaphore=request.app.state.semaphore
+        # 생성 큐에 작업 등록 (워커가 대기 중인 요청을 묶어서 처리)
+        request.app.state.generation_worker.submit(
+            GenerationJob(
+                task_id=task_id,
+                prompt=generate_request.prompt,
+                height=generate_request.height,
+                width=generate_request.width,
+                num_inference_steps=generate_request.num_inference_steps,
+                seed=generate_request.seed,
+            )
         )
 
         logger.info(f"이미지 생성 요청 됨 task id: {task_id}")

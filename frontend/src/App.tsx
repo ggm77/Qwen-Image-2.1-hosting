@@ -23,7 +23,7 @@ const App: React.FC = () => {
   const [prompt, setPrompt] = useState("");
   const [height, setHeight] = useState(768);
   const [width, setWidth] = useState(768);
-  const [numSteps, setNumSteps] = useState(40);
+  const [numSteps, setNumSteps] = useState(20);
   const [seed, setSeed] = useState(42);
 
   const [taskId, setTaskId] = useState("");
