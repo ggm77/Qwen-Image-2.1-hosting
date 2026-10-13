@@ -713,8 +713,18 @@
 }
 
 /* ---------- Job list ---------- */
+.task-prompt-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
 .task-prompt {
-  margin: 0 0 12px;
+  flex: 1;
+  min-width: 0;
+  margin: 0;
   font-size: 14px;
   line-height: 1.5;
   color: var(--text);

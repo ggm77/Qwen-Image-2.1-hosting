@@ -240,6 +240,31 @@ const jobFromTask = (task: TaskStatus): Job => {
   };
 };
 
+// 클립보드에 복사한다. http(비보안) 주소로 접속하면 navigator.clipboard가 없어 execCommand로 대신한다.
+const copyText = async (text: string): Promise<boolean> => {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    // 아래 fallback으로 진행
+  }
+
+  const el = document.createElement("textarea");
+  el.value = text;
+  el.setAttribute("readonly", "");
+  el.style.position = "fixed";
+  el.style.opacity = "0";
+  document.body.appendChild(el);
+  el.select();
+  try {
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    document.body.removeChild(el);
+  }
+};
+
 const percentOf = (job: Job) =>
   job.totalSteps > 0 ? Math.min(100, Math.round((job.currentStep / job.totalSteps) * 100)) : 0;
 
@@ -277,7 +302,7 @@ const App: React.FC = () => {
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
 
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<"id" | "prompt" | null>(null);
   const [theme, setTheme] = useState<Theme>(readStoredTheme);
 
   const pollTimersRef = useRef<Map<string, number>>(new Map());
@@ -615,15 +640,15 @@ const App: React.FC = () => {
 
   const selected = jobs.find((job) => job.id === selectedId) ?? null;
 
-  const handleCopyTaskId = async () => {
-    if (!selected) return;
-    try {
-      await navigator.clipboard.writeText(selected.id);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1500);
-    } catch {
-      // 클립보드 접근이 막힌 환경에서는 조용히 무시
+  const handleCopy = async (kind: "id" | "prompt") => {
+    const text = kind === "id" ? selected?.id : selected?.prompt;
+    if (!text) return;
+    if (!(await copyText(text))) {
+      setError("클립보드에 복사하지 못했어요.");
+      return;
     }
+    setCopied(kind);
+    window.setTimeout(() => setCopied((current) => (current === kind ? null : current)), 1500);
   };
 
   const closeError = () => {
@@ -926,7 +951,20 @@ const App: React.FC = () => {
             <h2 className="section-title">작업 상태</h2>
             {selected ? (
               <>
-                {selected.prompt && <p className="task-prompt">{selected.prompt}</p>}
+                {selected.prompt && (
+                  <div className="task-prompt-row">
+                    <p className="task-prompt">{selected.prompt}</p>
+                    <button
+                      type="button"
+                      className="copy-btn"
+                      onClick={() => handleCopy("prompt")}
+                      aria-label="프롬프트 복사"
+                      title={copied === "prompt" ? "복사됨" : "프롬프트 복사"}
+                    >
+                      {copied === "prompt" ? <CheckIcon /> : <CopyIcon />}
+                    </button>
+                  </div>
+                )}
                 {selected.info && <p className="task-info">{selected.info}</p>}
                 <div className="task-head">
                   <div className="task-id">
@@ -936,11 +974,11 @@ const App: React.FC = () => {
                     <button
                       type="button"
                       className="copy-btn"
-                      onClick={handleCopyTaskId}
+                      onClick={() => handleCopy("id")}
                       aria-label="task_id 복사"
-                      title={copied ? "복사됨" : "task_id 복사"}
+                      title={copied === "id" ? "복사됨" : "task_id 복사"}
                     >
-                      {copied ? <CheckIcon /> : <CopyIcon />}
+                      {copied === "id" ? <CheckIcon /> : <CopyIcon />}
                     </button>
                   </div>
                   {selectedStatus.length > 0 && (
