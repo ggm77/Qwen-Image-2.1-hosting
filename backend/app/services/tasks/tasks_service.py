@@ -8,38 +8,43 @@ from app.core.config import settings
 
 class TasksService:
 
-    def get_all_task_id(self) -> list[TasksResponse]:
+    @staticmethod
+    def _to_response(row) -> TasksResponse:
+        task = dict(row)
+        return TasksResponse(
+            task_id=task["task_id"],
+            status=task["status"],
+            created_at=task["created_at"],
+            current_step=task["current_step"],
+            num_inference_steps=task["num_inference_steps"],
+            prompt=task["prompt"],
+            height=task["height"],
+            width=task["width"],
+            seed=task["seed"],
+            precision=task["precision"],
+        )
+
+    def get_all_task_id(self, limit: int = 100, offset: int = 0) -> list[TasksResponse]:
         with get_db_connection() as conn:
             cursor = conn.execute(
                 """
-                SELECT task_id, status, created_at, current_step, num_inference_steps
+                SELECT task_id, status, created_at, current_step, num_inference_steps,
+                       prompt, height, width, seed, precision
                 FROM tasks
-                ORDER BY created_at DESC
-                """
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT ? OFFSET ?
+                """,
+                (limit, offset)
             )
-            rows = cursor.fetchall()
-
-            tasks = []
-            for row in rows:
-                task = dict(row)
-                tasks.append(
-                    TasksResponse(
-                        task_id=task["task_id"],
-                        status=task["status"],
-                        created_at=task["created_at"],
-                        current_step=task["current_step"],
-                        num_inference_steps=task["num_inference_steps"]
-                    )
-                )
-
-            return tasks
+            return [self._to_response(row) for row in cursor.fetchall()]
 
     def get_task_status(self, task_id: str) -> TasksResponse:
 
         with get_db_connection() as conn:
             cursor = conn.execute(
                 """
-                SELECT task_id, status, created_at, current_step, num_inference_steps
+                SELECT task_id, status, created_at, current_step, num_inference_steps,
+                       prompt, height, width, seed, precision
                 FROM tasks
                 WHERE task_id = ?
                 """,
@@ -50,16 +55,8 @@ class TasksService:
             if row is None:
                 raise HTTPException(status_code=400, detail="작업을 찾을 수 없습니다.")
 
-            task = dict(row)
+            return self._to_response(row)
 
-            return TasksResponse(
-                task_id=task["task_id"],
-                status=task["status"],
-                created_at=task["created_at"],
-                current_step=task["current_step"],
-                num_inference_steps=task["num_inference_steps"]
-            )
-        
     def get_task_result(self, task_id: str) -> BytesIO:
         
         with get_db_connection() as conn:

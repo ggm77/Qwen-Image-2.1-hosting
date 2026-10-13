@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 
 from app.schemas.tasks.tasks import TasksResponse
@@ -11,9 +11,12 @@ router = APIRouter(
 
 @router.get("/tasks")
 async def get_all_tasks(
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     service: TasksService = Depends()
 ) -> list[TasksResponse]:
-    return service.get_all_task_id()
+    """최근 작업부터 limit개를 돌려준다. 더 오래된 작업은 offset으로 이어서 조회한다."""
+    return service.get_all_task_id(limit=limit, offset=offset)
 
 @router.get("/tasks/{task_id}")
 async def get_task_status(

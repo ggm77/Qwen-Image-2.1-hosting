@@ -24,6 +24,8 @@ type Job = {
   error: string | null;
   finished: boolean; // 완료·실패·조회 오류로 더 이상 폴링하지 않는 상태
   ratio: number;
+  createdAt?: number; // ms
+  info?: string; // "512×512 · 20스텝 · seed 42 · int8"
 };
 
 type TaskStatus = {
@@ -32,9 +34,15 @@ type TaskStatus = {
   created_at: string;
   current_step: number;
   num_inference_steps: number;
+  prompt: string;
+  height: number;
+  width: number;
+  seed: number;
+  precision: string;
 };
 
 const POLL_INTERVAL_MS = 1500;
+const HISTORY_PAGE_SIZE = 50;
 
 // 백엔드 요청 값 범위 (backend/app/schemas/generate/generate.py 와 맞출 것)
 const MIN_IMAGE_SIZE = 64;
@@ -196,6 +204,42 @@ const MoonIcon = ({ size = 18 }: IconProps) => (
   </svg>
 );
 
+// 서버의 created_at은 SQLite CURRENT_TIMESTAMP(UTC, "YYYY-MM-DD HH:MM:SS")이다.
+const parseServerTime = (value: string): number | undefined => {
+  const time = Date.parse(`${value.replace(" ", "T")}Z`);
+  return Number.isNaN(time) ? undefined : time;
+};
+
+const formatTime = (time: number) =>
+  new Date(time).toLocaleString("ko-KR", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
+const describeTask = (t: Pick<TaskStatus, "width" | "height" | "num_inference_steps" | "seed" | "precision">) =>
+  `${t.width}×${t.height} · ${t.num_inference_steps}스텝 · seed ${t.seed} · ${t.precision}`;
+
+// 서버가 돌려준 작업 하나를 목록 항목으로 바꾼다. 완료된 작업의 이미지는 결과 API를 그대로 가리킨다.
+const jobFromTask = (task: TaskStatus): Job => {
+  const completed = task.status === "completed";
+  const failed = task.status === "failed";
+  return {
+    id: task.task_id,
+    prompt: task.prompt,
+    status: task.status,
+    currentStep: task.current_step,
+    totalSteps: task.num_inference_steps,
+    imageUrl: completed ? `/api/v1/tasks/${task.task_id}/result` : null,
+    error: failed ? "태스크가 실패했습니다." : null,
+    finished: completed || failed,
+    ratio: task.width > 0 && task.height > 0 ? task.width / task.height : 1,
+    createdAt: parseServerTime(task.created_at),
+    info: describeTask(task),
+  };
+};
+
 const percentOf = (job: Job) =>
   job.totalSteps > 0 ? Math.min(100, Math.round((job.currentStep / job.totalSteps) * 100)) : 0;
 
@@ -230,12 +274,17 @@ const App: React.FC = () => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  const [hasMoreHistory, setHasMoreHistory] = useState(false);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+
   const [copied, setCopied] = useState(false);
   const [theme, setTheme] = useState<Theme>(readStoredTheme);
 
   const pollTimersRef = useRef<Map<string, number>>(new Map());
   const jobsRef = useRef<Job[]>([]);
   const stageRef = useRef<HTMLElement | null>(null);
+  const historyOffsetRef = useRef(0);
+  const historyRequestedRef = useRef(false);
 
   useEffect(() => {
     jobsRef.current = jobs;
@@ -332,9 +381,12 @@ const App: React.FC = () => {
         if (!pollTimersRef.current.has(id)) return;
 
         updateJob(id, {
+          prompt: data.prompt,
           status: data.status,
           currentStep: data.current_step,
           totalSteps: data.num_inference_steps,
+          createdAt: parseServerTime(data.created_at),
+          info: describeTask(data),
         });
 
         if (data.status === "completed") {
@@ -359,6 +411,45 @@ const App: React.FC = () => {
     pollTimersRef.current.set(id, window.setInterval(poll, POLL_INTERVAL_MS));
     poll(); // 즉시 1회 조회 후 주기 폴링
   };
+
+  // 서버에 저장된 이전 작업을 최근 순으로 불러와 목록 뒤에 붙인다.
+  const loadHistory = async () => {
+    setIsLoadingHistory(true);
+    try {
+      const res = await fetch(`/api/v1/tasks?limit=${HISTORY_PAGE_SIZE}&offset=${historyOffsetRef.current}`);
+      if (!res.ok) {
+        throw new Error(await readErrorMessage(res, `이전 작업 목록 요청 실패: ${res.status}`));
+      }
+
+      const tasks: TaskStatus[] = await res.json();
+      historyOffsetRef.current += tasks.length;
+      setHasMoreHistory(tasks.length === HISTORY_PAGE_SIZE);
+
+      // 이미 목록에 있는 작업(방금 제출했거나 조회한 것)은 건너뛴다.
+      const known = new Set(jobsRef.current.map((job) => job.id));
+      const fresh = tasks.filter((task) => !known.has(task.task_id)).map(jobFromTask);
+
+      setJobs((prev) => {
+        const ids = new Set(prev.map((job) => job.id));
+        return [...prev, ...fresh.filter((job) => !ids.has(job.id))];
+      });
+      // 서버 재시작 등으로 아직 진행 중인 작업은 이어서 추적한다.
+      fresh.filter((job) => !job.finished).forEach((job) => startPolling(job.id));
+    } catch (err) {
+      console.error(err);
+      setError(err instanceof Error ? err.message : "알 수 없는 오류입니다.");
+    } finally {
+      setIsLoadingHistory(false);
+    }
+  };
+
+  // 처음 열 때 이전 작업을 한 번 불러온다. (StrictMode의 이중 실행에서도 한 번만 요청)
+  useEffect(() => {
+    if (historyRequestedRef.current) return;
+    historyRequestedRef.current = true;
+    void loadHistory();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 좁은 화면에서는 결과 영역이 폼 아래에 있으므로 시작 시 보이는 위치로 옮긴다.
   const revealStage = () => {
@@ -437,6 +528,8 @@ const App: React.FC = () => {
             error: null,
             finished: false,
             ratio,
+            createdAt: Date.now(),
+            info: `${widthValue}×${heightValue} · ${stepsValue}스텝 · seed ${seedValue} · ${precision}`,
           });
         } else {
           console.error(result.reason);
@@ -784,6 +877,9 @@ const App: React.FC = () => {
                   className="preview-img"
                   src={selected.imageUrl}
                   alt="생성된 이미지"
+                  onError={() =>
+                    updateJob(selected.id, { imageUrl: null, error: "결과 이미지를 불러올 수 없어요." })
+                  }
                   onLoad={(e) => {
                     const { naturalWidth, naturalHeight } = e.currentTarget;
                     if (naturalWidth > 0 && naturalHeight > 0) {
@@ -831,6 +927,7 @@ const App: React.FC = () => {
             {selected ? (
               <>
                 {selected.prompt && <p className="task-prompt">{selected.prompt}</p>}
+                {selected.info && <p className="task-info">{selected.info}</p>}
                 <div className="task-head">
                   <div className="task-id">
                     <span className="task-id-text" title={selected.id}>
@@ -902,7 +999,12 @@ const App: React.FC = () => {
                       >
                         <span className="job-thumb">
                           {job.imageUrl ? (
-                            <img src={job.imageUrl} alt="" />
+                            <img
+                              src={job.imageUrl}
+                              alt=""
+                              loading="lazy"
+                              onError={() => updateJob(job.id, { imageUrl: null })}
+                            />
                           ) : job.finished ? (
                             <ImageIcon size={18} />
                           ) : (
@@ -913,7 +1015,8 @@ const App: React.FC = () => {
                           <span className={`job-title${job.prompt ? "" : " is-mono"}`}>{job.prompt ?? job.id}</span>
                           <span className="job-sub">
                             {job.status && <span className={`badge badge-${job.status}`}>{label}</span>}
-                            <span>{percent}%</span>
+                            {job.finished && job.status === "completed" ? null : <span>{percent}%</span>}
+                            {job.createdAt !== undefined && <span>{formatTime(job.createdAt)}</span>}
                           </span>
                         </span>
                       </button>
@@ -930,6 +1033,11 @@ const App: React.FC = () => {
                   );
                 })}
               </ul>
+              {hasMoreHistory && (
+                <button type="button" className="btn btn-sm load-more" onClick={loadHistory} disabled={isLoadingHistory}>
+                  {isLoadingHistory ? "불러오는 중..." : "이전 작업 더 보기"}
+                </button>
+              )}
             </div>
           )}
         </section>
