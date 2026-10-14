@@ -67,5 +67,6 @@ PYTHONPATH= .venv/bin/pip install -r requirements.txt
 ```bash
 cd frontend
 npm install
-npm run dev
+npm start      # 빌드 후 서빙 (사용용). 탭을 오가도 페이지가 새로고침되지 않는다.
+# npm run dev  # 개발용 (HMR). 백그라운드에 있던 탭으로 돌아오면 페이지가 새로고침된다.
 ```
