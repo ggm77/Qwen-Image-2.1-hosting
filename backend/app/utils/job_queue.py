@@ -96,6 +96,11 @@ class GenerationWorker:
             logger.error(f"[Qwen] 프롬프트 인코딩 실패: {ex}")
             for job in batch:
                 mark_failed(job.task_id)
+            embeds = None
+        if embeds is None:
+            # 예외의 traceback이 인코더를 붙잡고 있어 encode_prompts 안에서의 해제는 효과가 없었다.
+            # except 블록을 벗어나 traceback이 사라진 뒤에 다시 비운다.
+            mm.free_memory()
             return
         set_status(to_encode, "queued")  # 인코딩이 끝났다. DiT 순서가 올 때까지는 다시 대기 중이다.
 
@@ -124,6 +129,10 @@ class GenerationWorker:
             logger.error(f"[Qwen] 생성 모델 로딩 실패 (precision={precision}): {ex}")
             for job in jobs:
                 mark_failed(job.task_id)
+            pipe = None
+        if pipe is None:
+            # 로딩 도중 올라간 가중치는 traceback이 사라진 뒤에야 해제되므로 except 블록 밖에서 비운다
+            mm.free_memory()
             return
 
         pending: deque[tuple[GenerationJob, PromptEmbeds]] = deque(
@@ -136,6 +145,9 @@ class GenerationWorker:
                     job, pipe, prompt_embeds, prompt_embeds_mask, image_pad_mask, self.device,
                     should_stop=self._stop_event.is_set,
                 )
+                # 요청마다 크기(해상도, 입력 이미지 수)가 달라 이전 이미지의 버퍼(KV 캐시, 어텐션 등)가
+                # MPS 캐시에 남아 쌓이므로 이미지마다 비운다 (실패한 이미지도 generate_image 안에서 예외가 끝난 뒤라 해제된다)
+                mm.free_memory()
 
                 if not pending:
                     pending.extend(self._take_cached(precision))
