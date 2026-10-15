@@ -13,6 +13,7 @@ type GenerateRequest = {
   num_inference_steps: number;
   seed: number;
   precision: Precision;
+  encoder_precision: Precision;
   images?: string[]; // base64 data URL
 };
 
@@ -46,6 +47,7 @@ type TaskSettings = {
   steps: number;
   seed: number;
   precision: string;
+  encoderPrecision: string;
 };
 
 // 폼에 다시 채워 넣을 수 있는 직전 제출 내용. 숫자 입력은 폼과 같이 문자열로 들고 있다.
@@ -56,6 +58,7 @@ type FormSnapshot = {
   steps: string;
   seed: string;
   precision: Precision;
+  encoderPrecision: Precision;
   // 입력 이미지는 용량 때문에 브라우저에 저장하지 않고, 서버에 있는 이 작업의 입력 이미지를 다시 받아온다.
   inputsFrom?: { taskId: string; count: number };
 };
@@ -71,6 +74,7 @@ type TaskStatus = {
   width: number;
   seed: number;
   precision: string;
+  encoder_precision: string;
   input_image_count?: number;
 };
 
@@ -100,6 +104,11 @@ const SIZE_PRESETS = [
 const PRECISIONS: { value: Precision; title: string; desc: string }[] = [
   { value: "bf16", title: "bf16", desc: "원본 · 메모리 많이 사용" },
   { value: "int8", title: "int8", desc: "양자화 · 더 빠름" },
+];
+
+const ENCODER_PRECISIONS: { value: Precision; title: string; desc: string }[] = [
+  { value: "bf16", title: "bf16", desc: "원본 · 인코딩 준비 느림" },
+  { value: "int8", title: "int8", desc: "양자화 · 더 빠름 (첫 사용은 느림)" },
 ];
 
 const STATUS_LABELS: Record<string, string> = {
@@ -176,7 +185,8 @@ const readStoredSubmission = (): FormSnapshot | null => {
       (v.inputsFrom === undefined ||
         (typeof v.inputsFrom?.taskId === "string" && Number.isInteger(v.inputsFrom?.count) && v.inputsFrom.count > 0))
     ) {
-      return v as FormSnapshot;
+      // 이전 버전에서 저장한 기록에는 인코더 정밀도가 없다 (그때는 항상 원본 인코더)
+      return { ...v, encoderPrecision: isPrecision(v.encoderPrecision) ? v.encoderPrecision : "bf16" } as FormSnapshot;
     }
   } catch {
     // 저장소를 쓸 수 없거나 JSON이 깨졌으면 무시
@@ -185,7 +195,11 @@ const readStoredSubmission = (): FormSnapshot | null => {
 };
 
 // 작업 하나의 프롬프트와 생성 설정을 폼에 채울 수 있는 형태로 바꾼다. (프롬프트나 설정을 모르면 null)
-const snapshotFromJob = (job: Job | null | undefined, fallbackPrecision: Precision): FormSnapshot | null => {
+const snapshotFromJob = (
+  job: Job | null | undefined,
+  fallbackPrecision: Precision,
+  fallbackEncoderPrecision: Precision,
+): FormSnapshot | null => {
   if (!job?.prompt || !job.settings) return null;
   return {
     prompts: [job.prompt],
@@ -194,6 +208,9 @@ const snapshotFromJob = (job: Job | null | undefined, fallbackPrecision: Precisi
     steps: String(job.settings.steps),
     seed: String(job.settings.seed),
     precision: isPrecision(job.settings.precision) ? job.settings.precision : fallbackPrecision,
+    encoderPrecision: isPrecision(job.settings.encoderPrecision)
+      ? job.settings.encoderPrecision
+      : fallbackEncoderPrecision,
     inputsFrom: job.inputImageCount ? { taskId: job.id, count: job.inputImageCount } : undefined,
   };
 };
@@ -333,17 +350,24 @@ const formatTime = (time: number) =>
   });
 
 const describeTask = (
-  t: Pick<TaskStatus, "width" | "height" | "num_inference_steps" | "seed" | "precision" | "input_image_count">,
+  t: Pick<
+    TaskStatus,
+    "width" | "height" | "num_inference_steps" | "seed" | "precision" | "encoder_precision" | "input_image_count"
+  >,
 ) =>
   `${t.width}×${t.height} · ${t.num_inference_steps}스텝 · seed ${t.seed} · ${t.precision}` +
+  (t.encoder_precision === "int8" ? " · 인코더 int8" : "") +
   (t.input_image_count ? ` · 입력 이미지 ${t.input_image_count}장` : "");
 
-const settingsOf = (t: Pick<TaskStatus, "width" | "height" | "num_inference_steps" | "seed" | "precision">): TaskSettings => ({
+const settingsOf = (
+  t: Pick<TaskStatus, "width" | "height" | "num_inference_steps" | "seed" | "precision" | "encoder_precision">,
+): TaskSettings => ({
   width: t.width,
   height: t.height,
   steps: t.num_inference_steps,
   seed: t.seed,
   precision: t.precision,
+  encoderPrecision: t.encoder_precision,
 });
 
 // 서버가 돌려준 작업 하나를 목록 항목으로 바꾼다. 완료된 작업의 이미지는 결과 API를 그대로 가리킨다.
@@ -398,7 +422,7 @@ const percentOf = (job: Job) =>
 // 크기를 생략하면 서버가 정한 값이 돌아온다.
 type GenerateResponse = Pick<
   TaskStatus,
-  "task_id" | "status" | "width" | "height" | "num_inference_steps" | "seed" | "precision" | "input_image_count"
+  "task_id" | "status" | "width" | "height" | "num_inference_steps" | "seed" | "precision" | "encoder_precision" | "input_image_count"
 >;
 
 // 프롬프트 하나를 큐에 넣고 task_id를 돌려받는다.
@@ -422,6 +446,7 @@ const App: React.FC = () => {
   const [numSteps, setNumSteps] = useState("20");
   const [seed, setSeed] = useState("42");
   const [precision, setPrecision] = useState<Precision>("int8");
+  const [encoderPrecision, setEncoderPrecision] = useState<Precision>("bf16");
   const [images, setImages] = useState<AttachedImage[]>([]);
   // 입력 이미지가 있을 때 출력 크기를 마지막 이미지의 비율에 맡길지 (켜면 가로/세로를 보내지 않는다)
   const [followImageSize, setFollowImageSize] = useState(true);
@@ -746,6 +771,7 @@ const App: React.FC = () => {
             num_inference_steps: stepsValue,
             seed: seedValue,
             precision,
+            encoder_precision: encoderPrecision,
             ...(images.length > 0 ? { images: images.map((img) => img.dataUrl) } : {}),
           }),
         ),
@@ -793,6 +819,7 @@ const App: React.FC = () => {
           steps: numSteps,
           seed,
           precision,
+          encoderPrecision,
           inputsFrom: images.length > 0 ? { taskId: created[0].id, count: images.length } : undefined,
         };
         setLastSubmission(snapshot);
@@ -914,8 +941,8 @@ const App: React.FC = () => {
 
   // 직전 제출 내용. 이 브라우저에 기록이 없으면(예: 처음 열었을 때) 목록에서 가장 최근 작업을 쓴다.
   const restorable: FormSnapshot | null =
-    lastSubmission ?? snapshotFromJob(jobs.find((job) => job.prompt && job.settings), precision);
-  const selectedSnapshot = snapshotFromJob(selected, precision);
+    lastSubmission ?? snapshotFromJob(jobs.find((job) => job.prompt && job.settings), precision, encoderPrecision);
+  const selectedSnapshot = snapshotFromJob(selected, precision, encoderPrecision);
 
   // 폼에 채운다. 입력 이미지는 그 작업이 서버에 저장해 둔 것을 다시 받아와서 첨부한다.
   const applySnapshot = async (snapshot: FormSnapshot, source: string) => {
@@ -925,6 +952,7 @@ const App: React.FC = () => {
     setNumSteps(snapshot.steps);
     setSeed(snapshot.seed);
     setPrecision(snapshot.precision);
+    setEncoderPrecision(snapshot.encoderPrecision);
     setError(null);
 
     let restoredImages: AttachedImage[] = [];
@@ -1235,8 +1263,8 @@ const App: React.FC = () => {
             </div>
 
             <div className="field">
-              <span className="label">정밀도</span>
-              <div className="segmented" role="group" aria-label="정밀도">
+              <span className="label">생성 모델 정밀도</span>
+              <div className="segmented" role="group" aria-label="생성 모델 정밀도">
                 {PRECISIONS.map((p) => (
                   <button
                     key={p.value}
@@ -1244,6 +1272,24 @@ const App: React.FC = () => {
                     className="segment"
                     aria-pressed={precision === p.value}
                     onClick={() => setPrecision(p.value)}
+                  >
+                    <span className="segment-title">{p.title}</span>
+                    <span className="segment-desc">{p.desc}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="field">
+              <span className="label">텍스트 인코더 정밀도</span>
+              <div className="segmented" role="group" aria-label="텍스트 인코더 정밀도">
+                {ENCODER_PRECISIONS.map((p) => (
+                  <button
+                    key={p.value}
+                    type="button"
+                    className="segment"
+                    aria-pressed={encoderPrecision === p.value}
+                    onClick={() => setEncoderPrecision(p.value)}
                   >
                     <span className="segment-title">{p.title}</span>
                     <span className="segment-desc">{p.desc}</span>
@@ -1273,7 +1319,7 @@ const App: React.FC = () => {
               disabled={!restorable}
               title={
                 restorable
-                  ? `프롬프트 ${restorable.prompts.length}개, ${restorable.width}×${restorable.height}, ${restorable.steps}스텝, seed ${restorable.seed}, ${restorable.precision}${restorable.inputsFrom ? `, 입력 이미지 ${restorable.inputsFrom.count}장` : ""}`
+                  ? `프롬프트 ${restorable.prompts.length}개, ${restorable.width}×${restorable.height}, ${restorable.steps}스텝, seed ${restorable.seed}, ${restorable.precision}${restorable.encoderPrecision === "int8" ? ", 인코더 int8" : ""}${restorable.inputsFrom ? `, 입력 이미지 ${restorable.inputsFrom.count}장` : ""}`
                   : "아직 직전 작업이 없어요"
               }
             >
