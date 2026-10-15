@@ -7,11 +7,19 @@ type Theme = "system" | "light" | "dark";
 
 type GenerateRequest = {
   prompt: string;
-  height: number;
-  width: number;
+  height?: number; // height와 width는 둘 다 생략하면 서버가 마지막 입력 이미지의 비율로 정한다
+  width?: number;
   num_inference_steps: number;
   seed: number;
   precision: Precision;
+  images?: string[]; // base64 data URL
+};
+
+// 폼에 첨부한 입력(참조) 이미지
+type AttachedImage = {
+  id: string;
+  name: string;
+  dataUrl: string;
 };
 
 type Job = {
@@ -25,6 +33,7 @@ type Job = {
   finished: boolean; // 완료·실패·조회 오류로 더 이상 폴링하지 않는 상태
   ratio: number;
   createdAt?: number; // ms
+  inputImageCount?: number; // 첨부한 입력 이미지 수
   info?: string; // "512×512 · 20스텝 · seed 42 · int8"
   settings?: TaskSettings;
 };
@@ -45,6 +54,8 @@ type FormSnapshot = {
   steps: string;
   seed: string;
   precision: Precision;
+  // 입력 이미지는 용량 때문에 브라우저에 저장하지 않고, 서버에 있는 이 작업의 입력 이미지를 다시 받아온다.
+  inputsFrom?: { taskId: string; count: number };
 };
 
 type TaskStatus = {
@@ -58,6 +69,7 @@ type TaskStatus = {
   width: number;
   seed: number;
   precision: string;
+  input_image_count?: number;
 };
 
 const POLL_INTERVAL_MS = 1500;
@@ -69,6 +81,8 @@ const MAX_IMAGE_SIZE = 1024;
 const IMAGE_SIZE_STEP = 32;
 const MAX_STEPS = 100;
 const MAX_PROMPT_LENGTH = 2000;
+const MAX_INPUT_IMAGES = 4;
+const MAX_INPUT_IMAGE_BYTES = 20 * 1024 * 1024;
 const MAX_PROMPTS_PER_SUBMIT = 50; // 한 번에 큐에 넣을 수 있는 프롬프트 수 (UI 제한)
 const MAX_SEED = 2 ** 31 - 1; // 랜덤 시드는 JS 정수 안전 범위 안에서만 뽑는다
 
@@ -147,7 +161,9 @@ const readStoredSubmission = (): FormSnapshot | null => {
       isDigits(v.height) &&
       isDigits(v.steps) &&
       isDigits(v.seed) &&
-      isPrecision(v.precision)
+      isPrecision(v.precision) &&
+      (v.inputsFrom === undefined ||
+        (typeof v.inputsFrom?.taskId === "string" && Number.isInteger(v.inputsFrom?.count) && v.inputsFrom.count > 0))
     ) {
       return v as FormSnapshot;
     }
@@ -167,8 +183,19 @@ const snapshotFromJob = (job: Job | null | undefined, fallbackPrecision: Precisi
     steps: String(job.settings.steps),
     seed: String(job.settings.seed),
     precision: isPrecision(job.settings.precision) ? job.settings.precision : fallbackPrecision,
+    inputsFrom: job.inputImageCount ? { taskId: job.id, count: job.inputImageCount } : undefined,
   };
 };
+
+const readAsDataUrl = (blob: Blob): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+
+const inputImageUrl = (taskId: string, index: number) => `/api/v1/tasks/${taskId}/inputs/${index}`;
 
 /* ---------- Icons ---------- */
 type IconProps = { size?: number };
@@ -197,6 +224,12 @@ const ImageIcon = ({ size = 24 }: IconProps) => (
     <rect x="3" y="3" width="18" height="18" rx="3" />
     <circle cx="9" cy="9" r="1.8" />
     <path d="M21 16l-5-5-9 9" />
+  </svg>
+);
+
+const PlusIcon = ({ size = 18 }: IconProps) => (
+  <svg {...iconProps(size)}>
+    <path d="M12 5v14M5 12h14" />
   </svg>
 );
 
@@ -288,8 +321,11 @@ const formatTime = (time: number) =>
     minute: "2-digit",
   });
 
-const describeTask = (t: Pick<TaskStatus, "width" | "height" | "num_inference_steps" | "seed" | "precision">) =>
-  `${t.width}×${t.height} · ${t.num_inference_steps}스텝 · seed ${t.seed} · ${t.precision}`;
+const describeTask = (
+  t: Pick<TaskStatus, "width" | "height" | "num_inference_steps" | "seed" | "precision" | "input_image_count">,
+) =>
+  `${t.width}×${t.height} · ${t.num_inference_steps}스텝 · seed ${t.seed} · ${t.precision}` +
+  (t.input_image_count ? ` · 입력 이미지 ${t.input_image_count}장` : "");
 
 const settingsOf = (t: Pick<TaskStatus, "width" | "height" | "num_inference_steps" | "seed" | "precision">): TaskSettings => ({
   width: t.width,
@@ -314,6 +350,7 @@ const jobFromTask = (task: TaskStatus): Job => {
     finished: completed || failed,
     ratio: task.width > 0 && task.height > 0 ? task.width / task.height : 1,
     createdAt: parseServerTime(task.created_at),
+    inputImageCount: task.input_image_count ?? 0,
     info: describeTask(task),
     settings: settingsOf(task),
   };
@@ -347,7 +384,11 @@ const copyText = async (text: string): Promise<boolean> => {
 const percentOf = (job: Job) =>
   job.totalSteps > 0 ? Math.min(100, Math.round((job.currentStep / job.totalSteps) * 100)) : 0;
 
-type GenerateResponse = { task_id: string; status: string };
+// 크기를 생략하면 서버가 정한 값이 돌아온다.
+type GenerateResponse = Pick<
+  TaskStatus,
+  "task_id" | "status" | "width" | "height" | "num_inference_steps" | "seed" | "precision" | "input_image_count"
+>;
 
 // 프롬프트 하나를 큐에 넣고 task_id를 돌려받는다.
 const requestGenerate = async (payload: GenerateRequest): Promise<GenerateResponse> => {
@@ -370,6 +411,10 @@ const App: React.FC = () => {
   const [numSteps, setNumSteps] = useState("20");
   const [seed, setSeed] = useState("42");
   const [precision, setPrecision] = useState<Precision>("int8");
+  const [images, setImages] = useState<AttachedImage[]>([]);
+  // 입력 이미지가 있을 때 출력 크기를 마지막 이미지의 비율에 맡길지 (켜면 가로/세로를 보내지 않는다)
+  const [followImageSize, setFollowImageSize] = useState(true);
+  const [isDraggingImage, setIsDraggingImage] = useState(false);
 
   const [lookupTaskId, setLookupTaskId] = useState("");
 
@@ -390,6 +435,8 @@ const App: React.FC = () => {
   const pollTimersRef = useRef<Map<string, number>>(new Map());
   const jobsRef = useRef<Job[]>([]);
   const stageRef = useRef<HTMLElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const imageSeqRef = useRef(0);
   const historyOffsetRef = useRef(0);
   const historyRequestedRef = useRef(false);
 
@@ -493,6 +540,7 @@ const App: React.FC = () => {
           currentStep: data.current_step,
           totalSteps: data.num_inference_steps,
           createdAt: parseServerTime(data.created_at),
+          inputImageCount: data.input_image_count ?? 0,
           info: describeTask(data),
           settings: settingsOf(data),
         });
@@ -568,6 +616,64 @@ const App: React.FC = () => {
     }
   };
 
+  // 선택하거나 끌어다 놓은 파일을 입력 이미지로 추가한다. 개수와 용량 제한을 넘는 파일은 건너뛴다.
+  const addFiles = async (files: File[]) => {
+    if (files.length === 0) return;
+
+    const room = MAX_INPUT_IMAGES - images.length;
+    const problems: string[] = [];
+    const accepted: File[] = [];
+    for (const file of files) {
+      if (!file.type.startsWith("image/")) {
+        problems.push(`${file.name}: 이미지 파일이 아니에요.`);
+      } else if (file.size > MAX_INPUT_IMAGE_BYTES) {
+        problems.push(`${file.name}: ${MAX_INPUT_IMAGE_BYTES / 1024 / 1024}MB 이하만 올릴 수 있어요.`);
+      } else if (accepted.length >= room) {
+        problems.push(`이미지는 최대 ${MAX_INPUT_IMAGES}장까지 첨부할 수 있어요.`);
+        break;
+      } else {
+        accepted.push(file);
+      }
+    }
+
+    try {
+      const loaded: AttachedImage[] = await Promise.all(
+        accepted.map(async (file) => ({
+          id: `img-${imageSeqRef.current++}`,
+          name: file.name,
+          dataUrl: await readAsDataUrl(file),
+        })),
+      );
+      if (loaded.length > 0) {
+        // 첫 이미지를 붙일 때는 이미지 비율을 따르는 것을 기본으로 한다.
+        if (images.length === 0) setFollowImageSize(true);
+        setImages((prev) => [...prev, ...loaded].slice(0, MAX_INPUT_IMAGES));
+      }
+    } catch (err) {
+      console.error(err);
+      problems.push("이미지를 읽지 못했어요.");
+    }
+
+    setError(problems.length > 0 ? [...new Set(problems)].join(" ") : null);
+  };
+
+  const handleFileInput = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = ""; // 같은 파일을 다시 고를 수 있도록 비운다
+    void addFiles(files);
+  };
+
+  const handleImageDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    setIsDraggingImage(false);
+    void addFiles(Array.from(e.dataTransfer.files));
+  };
+
+  const removeImage = (id: string) => setImages((prev) => prev.filter((img) => img.id !== id));
+
+  // 이미지가 있고 비율을 따르게 하면 가로/세로는 서버가 정한다.
+  const sizeFromImage = images.length > 0 && followImageSize;
+
   // 한 줄에 프롬프트 하나씩. 빈 줄은 건너뛴다.
   const promptLines = prompt
     .split("\n")
@@ -591,16 +697,13 @@ const App: React.FC = () => {
       setError(`프롬프트 한 줄은 최대 ${MAX_PROMPT_LENGTH}자까지 입력할 수 있어요.`);
       return;
     }
-    if (!width || !height || !numSteps || !seed) {
+    if ((!sizeFromImage && (!width || !height)) || !numSteps || !seed) {
       setError("가로, 세로, 추론 스텝, 시드를 모두 입력하세요.");
       return;
     }
 
-    const widthValue = Number(width);
-    const heightValue = Number(height);
     const stepsValue = Number(numSteps);
     const seedValue = Number(seed);
-    const ratio = widthValue > 0 && heightValue > 0 ? widthValue / heightValue : 1;
 
     setError(null);
     setIsSubmitting(true);
@@ -611,11 +714,11 @@ const App: React.FC = () => {
         promptLines.map((line) =>
           requestGenerate({
             prompt: line,
-            height: heightValue,
-            width: widthValue,
+            ...(sizeFromImage ? {} : { height: Number(height), width: Number(width) }),
             num_inference_steps: stepsValue,
             seed: seedValue,
             precision,
+            ...(images.length > 0 ? { images: images.map((img) => img.dataUrl) } : {}),
           }),
         ),
       );
@@ -626,19 +729,21 @@ const App: React.FC = () => {
 
       results.forEach((result, i) => {
         if (result.status === "fulfilled") {
+          const task = result.value; // 크기를 서버가 정했을 수 있으므로 응답 값을 쓴다
           created.push({
-            id: result.value.task_id,
+            id: task.task_id,
             prompt: promptLines[i],
-            status: result.value.status,
+            status: task.status,
             currentStep: 0,
-            totalSteps: stepsValue,
+            totalSteps: task.num_inference_steps,
             imageUrl: null,
             error: null,
             finished: false,
-            ratio,
+            ratio: task.width > 0 && task.height > 0 ? task.width / task.height : 1,
             createdAt: Date.now(),
-            info: `${widthValue}×${heightValue} · ${stepsValue}스텝 · seed ${seedValue} · ${precision}`,
-            settings: { width: widthValue, height: heightValue, steps: stepsValue, seed: seedValue, precision },
+            inputImageCount: task.input_image_count ?? 0,
+            info: describeTask(task),
+            settings: settingsOf(task),
           });
         } else {
           console.error(result.reason);
@@ -655,11 +760,12 @@ const App: React.FC = () => {
 
         const snapshot: FormSnapshot = {
           prompts: created.map((job) => job.prompt ?? ""),
-          width,
-          height,
+          width: String(created[0].settings?.width ?? width),
+          height: String(created[0].settings?.height ?? height),
           steps: numSteps,
           seed,
           precision,
+          inputsFrom: images.length > 0 ? { taskId: created[0].id, count: images.length } : undefined,
         };
         setLastSubmission(snapshot);
         try {
@@ -744,7 +850,8 @@ const App: React.FC = () => {
     lastSubmission ?? snapshotFromJob(jobs.find((job) => job.prompt && job.settings), precision);
   const selectedSnapshot = snapshotFromJob(selected, precision);
 
-  const applySnapshot = (snapshot: FormSnapshot, source: string) => {
+  // 폼에 채운다. 입력 이미지는 그 작업이 서버에 저장해 둔 것을 다시 받아와서 첨부한다.
+  const applySnapshot = async (snapshot: FormSnapshot, source: string) => {
     setPrompt(snapshot.prompts.join("\n"));
     setWidth(snapshot.width);
     setHeight(snapshot.height);
@@ -752,6 +859,26 @@ const App: React.FC = () => {
     setSeed(snapshot.seed);
     setPrecision(snapshot.precision);
     setError(null);
+
+    let restoredImages: AttachedImage[] = [];
+    if (snapshot.inputsFrom) {
+      const { taskId, count } = snapshot.inputsFrom;
+      try {
+        restoredImages = await Promise.all(
+          Array.from({ length: count }, async (_, i) => {
+            const res = await fetch(inputImageUrl(taskId, i));
+            if (!res.ok) throw new Error(await readErrorMessage(res, `입력 이미지 요청 실패: ${res.status}`));
+            return { id: `img-${imageSeqRef.current++}`, name: `이미지${i + 1}`, dataUrl: await readAsDataUrl(await res.blob()) };
+          }),
+        );
+      } catch (err) {
+        console.error(err);
+        setError(err instanceof Error ? `입력 이미지를 불러오지 못했어요. ${err.message}` : "입력 이미지를 불러오지 못했어요.");
+      }
+    }
+    setImages(restoredImages);
+    setFollowImageSize(false); // 저장된 가로/세로 그대로 다시 만든다
+
     setRestored(source);
     window.setTimeout(() => setRestored((current) => (current === source ? null : current)), 1500);
   };
@@ -832,59 +959,140 @@ const App: React.FC = () => {
             </div>
 
             <div className="field">
+              <div className="field-head">
+                <span className="label">
+                  참조 이미지 <span className="hint">(선택)</span>
+                </span>
+                <span className="hint">
+                  {images.length}/{MAX_INPUT_IMAGES}
+                </span>
+              </div>
+              <div
+                className={`attach${isDraggingImage ? " is-over" : ""}`}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setIsDraggingImage(true);
+                }}
+                onDragLeave={() => setIsDraggingImage(false)}
+                onDrop={handleImageDrop}
+              >
+                {images.length === 0 ? (
+                  <button type="button" className="attach-empty" onClick={() => fileInputRef.current?.click()}>
+                    <ImageIcon size={22} />
+                    <span>이미지를 끌어다 놓거나 클릭해서 추가</span>
+                  </button>
+                ) : (
+                  <ul className="attach-grid">
+                    {images.map((img, i) => (
+                      <li key={img.id} className="attach-item">
+                        <img src={img.dataUrl} alt={`이미지${i + 1}: ${img.name}`} title={img.name} />
+                        <span className="attach-index">이미지{i + 1}</span>
+                        <button
+                          type="button"
+                          className="attach-remove"
+                          onClick={() => removeImage(img.id)}
+                          aria-label={`이미지${i + 1} 제거`}
+                          title="제거"
+                        >
+                          <CloseIcon size={12} />
+                        </button>
+                      </li>
+                    ))}
+                    {images.length < MAX_INPUT_IMAGES && (
+                      <li className="attach-item attach-item-add">
+                        <button
+                          type="button"
+                          className="attach-add"
+                          onClick={() => fileInputRef.current?.click()}
+                          aria-label="이미지 추가"
+                          title="이미지 추가"
+                        >
+                          <PlusIcon />
+                        </button>
+                      </li>
+                    )}
+                  </ul>
+                )}
+              </div>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept="image/*"
+                multiple
+                hidden
+                onChange={handleFileInput}
+              />
+              <span className="hint">프롬프트에서는 이미지1, 이미지2처럼 순서로 가리켜요.</span>
+            </div>
+
+            <div className="field">
               <span className="label">비율</span>
-              <div className="ratios" role="group" aria-label="비율 프리셋">
-                {SIZE_PRESETS.map((p) => {
-                  const longSide = 20;
-                  const w = p.width >= p.height ? longSide : Math.round((longSide * p.width) / p.height);
-                  const h = p.height >= p.width ? longSide : Math.round((longSide * p.height) / p.width);
-                  return (
-                    <button
-                      key={p.label}
-                      type="button"
-                      className="ratio"
-                      aria-pressed={width === String(p.width) && height === String(p.height)}
-                      onClick={() => {
-                        setWidth(String(p.width));
-                        setHeight(String(p.height));
-                      }}
-                    >
-                      <span className="ratio-box">
-                        <span className="ratio-shape" style={{ width: w, height: h }} />
-                      </span>
-                      {p.label}
-                    </button>
-                  );
-                })}
-              </div>
-              <div className="row-2">
-                <div className="with-suffix">
+              {images.length > 0 && (
+                <label className="check">
                   <input
-                    className="input"
-                    type="text"
-                    inputMode="numeric"
-                    autoComplete="off"
-                    aria-label="가로(px)"
-                    value={width}
-                    onChange={(e) => setWidth(digitsOnly(e.target.value))}
+                    type="checkbox"
+                    checked={followImageSize}
+                    onChange={(e) => setFollowImageSize(e.target.checked)}
                   />
-                  <span className="suffix">W</span>
+                  <span>마지막 이미지의 비율 따르기</span>
+                </label>
+              )}
+              <fieldset className="size-controls" disabled={sizeFromImage}>
+                <div className="ratios" role="group" aria-label="비율 프리셋">
+                  {SIZE_PRESETS.map((p) => {
+                    const longSide = 20;
+                    const w = p.width >= p.height ? longSide : Math.round((longSide * p.width) / p.height);
+                    const h = p.height >= p.width ? longSide : Math.round((longSide * p.height) / p.width);
+                    return (
+                      <button
+                        key={p.label}
+                        type="button"
+                        className="ratio"
+                        aria-pressed={width === String(p.width) && height === String(p.height)}
+                        onClick={() => {
+                          setWidth(String(p.width));
+                          setHeight(String(p.height));
+                        }}
+                      >
+                        <span className="ratio-box">
+                          <span className="ratio-shape" style={{ width: w, height: h }} />
+                        </span>
+                        {p.label}
+                      </button>
+                    );
+                  })}
                 </div>
-                <div className="with-suffix">
-                  <input
-                    className="input"
-                    type="text"
-                    inputMode="numeric"
-                    autoComplete="off"
-                    aria-label="세로(px)"
-                    value={height}
-                    onChange={(e) => setHeight(digitsOnly(e.target.value))}
-                  />
-                  <span className="suffix">H</span>
+                <div className="row-2">
+                  <div className="with-suffix">
+                    <input
+                      className="input"
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="off"
+                      aria-label="가로(px)"
+                      value={width}
+                      onChange={(e) => setWidth(digitsOnly(e.target.value))}
+                    />
+                    <span className="suffix">W</span>
+                  </div>
+                  <div className="with-suffix">
+                    <input
+                      className="input"
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="off"
+                      aria-label="세로(px)"
+                      value={height}
+                      onChange={(e) => setHeight(digitsOnly(e.target.value))}
+                    />
+                    <span className="suffix">H</span>
+                  </div>
                 </div>
-              </div>
+              </fieldset>
               <span className="hint">
-                {MIN_IMAGE_SIZE}~{MAX_IMAGE_SIZE}px, {IMAGE_SIZE_STEP}의 배수
+                {sizeFromImage
+                  ? "크기는 서버가 이미지 비율에 맞춰 정해요 (약 768² 면적)"
+                  : `${MIN_IMAGE_SIZE}~${MAX_IMAGE_SIZE}px, ${IMAGE_SIZE_STEP}의 배수`}
               </span>
             </div>
 
@@ -977,11 +1185,11 @@ const App: React.FC = () => {
             <button
               type="button"
               className="btn restore-btn"
-              onClick={() => restorable && applySnapshot(restorable, LAST_RESTORE_SOURCE)}
+              onClick={() => restorable && void applySnapshot(restorable, LAST_RESTORE_SOURCE)}
               disabled={!restorable}
               title={
                 restorable
-                  ? `프롬프트 ${restorable.prompts.length}개, ${restorable.width}×${restorable.height}, ${restorable.steps}스텝, seed ${restorable.seed}, ${restorable.precision}`
+                  ? `프롬프트 ${restorable.prompts.length}개, ${restorable.width}×${restorable.height}, ${restorable.steps}스텝, seed ${restorable.seed}, ${restorable.precision}${restorable.inputsFrom ? `, 입력 이미지 ${restorable.inputsFrom.count}장` : ""}`
                   : "아직 직전 작업이 없어요"
               }
             >
@@ -1097,6 +1305,22 @@ const App: React.FC = () => {
                   </div>
                 )}
                 {selected.info && <p className="task-info">{selected.info}</p>}
+                {!!selected.inputImageCount && (
+                  <ul className="task-inputs" aria-label="입력 이미지">
+                    {Array.from({ length: selected.inputImageCount }, (_, i) => (
+                      <li key={i}>
+                        <a
+                          href={inputImageUrl(selected.id, i)}
+                          target="_blank"
+                          rel="noreferrer"
+                          title={`이미지${i + 1} 원본 보기`}
+                        >
+                          <img src={inputImageUrl(selected.id, i)} alt={`입력 이미지 ${i + 1}`} loading="lazy" />
+                        </a>
+                      </li>
+                    ))}
+                  </ul>
+                )}
                 <div className="task-head">
                   <div className="task-id">
                     <span className="task-id-text" title={selected.id}>
@@ -1139,7 +1363,7 @@ const App: React.FC = () => {
                     <button
                       type="button"
                       className="btn btn-sm"
-                      onClick={() => applySnapshot(selectedSnapshot, selected.id)}
+                      onClick={() => void applySnapshot(selectedSnapshot, selected.id)}
                       title="이 작업의 프롬프트와 생성 설정을 입력 폼에 채워요"
                     >
                       {restored === selected.id ? <CheckIcon size={14} /> : <RestoreIcon size={14} />}
