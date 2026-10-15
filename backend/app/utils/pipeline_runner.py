@@ -24,19 +24,21 @@ class GenerationJob:
     width: int
     num_inference_steps: int
     seed: int
-    precision: str = "bf16"
+    precision: str = "bf16"  # DiT 가중치 정밀도
+    encoder_precision: str = "bf16"  # 텍스트 인코더 가중치 정밀도
     input_images: list[str] = field(default_factory=list)  # 입력 이미지 파일 이름 (INPUT_IMG_DIR 기준)
 
     @property
-    def embed_key(self) -> tuple[str, tuple[str, ...]]:
-        """프롬프트 임베딩 캐시 키. 입력 이미지도 임베딩에 들어가므로 프롬프트만으로는 결정되지 않는다."""
-        return self.prompt, tuple(self.input_images)
+    def embed_key(self) -> tuple[str, tuple[str, ...], str]:
+        """프롬프트 임베딩 캐시 키. 입력 이미지와 인코더 정밀도도 임베딩을 바꾸므로 프롬프트만으로는 결정되지 않는다."""
+        return self.prompt, tuple(self.input_images), self.encoder_precision
 
     @classmethod
     def from_row(cls, row) -> "GenerationJob":
         return cls(
             task_id=row["task_id"], prompt=row["prompt"], height=row["height"], width=row["width"],
             num_inference_steps=row["num_inference_steps"], seed=row["seed"], precision=row["precision"],
+            encoder_precision=row["encoder_precision"],
             input_images=json.loads(row["input_images"] or "[]"),
         )
 

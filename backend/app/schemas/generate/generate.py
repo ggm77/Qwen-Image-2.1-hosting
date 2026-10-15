@@ -26,6 +26,8 @@ class GenerateRequest(BaseModel):
     num_inference_steps: int = Field(default=20, ge=1, le=MAX_STEPS)
     seed: int = Field(default=42, ge=0, le=MAX_SEED)
     precision: Literal["bf16", "int8"] = "bf16"  # DiT 가중치 정밀도
+    # 텍스트 인코더 가중치 정밀도. int8은 임베딩이 원본과 약간 달라지므로(같은 시드라도 이미지가 조금 다름) 같은 이미지를 재현하려면 같은 값을 써야 한다.
+    encoder_precision: Literal["bf16", "int8"] = "bf16"
     # 입력(참조) 이미지. base64 문자열 또는 data URL. 있으면 이미지 편집/참조 생성으로 동작한다.
     # 프롬프트에서는 순서대로 이미지1, 이미지2 ... 로 가리킨다.
     images: list[Base64Image] = Field(default_factory=list, max_length=MAX_INPUT_IMAGES)
@@ -45,4 +47,5 @@ class GenerateResponse(BaseModel):
     num_inference_steps: int
     seed: int
     precision: str
+    encoder_precision: str
     input_image_count: int = 0

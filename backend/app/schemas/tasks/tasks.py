@@ -11,6 +11,7 @@ class TasksResponse(BaseModel):
     width: int
     seed: int
     precision: str
+    encoder_precision: str = "bf16"
     input_image_count: int = 0
 
 

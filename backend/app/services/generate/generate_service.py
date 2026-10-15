@@ -39,8 +39,8 @@ class GenerateService:
             conn.execute(
             """
             INSERT INTO tasks (
-                    task_id, prompt, status, seed, height, width, num_inference_steps, precision, input_images
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    task_id, prompt, status, seed, height, width, num_inference_steps, precision, encoder_precision, input_images
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 task_id,
@@ -51,6 +51,7 @@ class GenerateService:
                 width,
                 generate_request.num_inference_steps,
                 generate_request.precision,
+                generate_request.encoder_precision,
                 json.dumps(input_images) if input_images else None,
             )
             )
@@ -66,6 +67,7 @@ class GenerateService:
                 num_inference_steps=generate_request.num_inference_steps,
                 seed=generate_request.seed,
                 precision=generate_request.precision,
+                encoder_precision=generate_request.encoder_precision,
                 input_images=input_images,
             )
         )
@@ -81,5 +83,6 @@ class GenerateService:
             num_inference_steps=generate_request.num_inference_steps,
             seed=generate_request.seed,
             precision=generate_request.precision,
+            encoder_precision=generate_request.encoder_precision,
             input_image_count=len(input_images),
         )

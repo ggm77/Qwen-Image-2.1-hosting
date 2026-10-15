@@ -9,6 +9,10 @@ class Settings:
     INT8_CACHE_PATH: str = os.path.normpath(
         os.path.join(MODEL_PATH, "..", "Qwen-Image-2.1-int8", "transformer.safetensors")
     )
+    # int8 양자화한 텍스트 인코더 가중치 캐시 (첫 encoder_precision=int8 요청 때 생성되고 이후 로딩에 재사용, 약 10GB)
+    ENCODER_INT8_CACHE_PATH: str = os.path.normpath(
+        os.path.join(MODEL_PATH, "..", "Qwen-Image-2.1-int8", "text_encoder.safetensors")
+    )
     IMG_DIR: str = os.path.join(BASE_DIR, "generated_images")
     # 요청에 첨부된 입력(조건) 이미지. 서버를 다시 시작해도 대기 중인 작업을 이어서 처리하려고 디스크에 보관한다.
     INPUT_IMG_DIR: str = os.path.join(BASE_DIR, "input_images")

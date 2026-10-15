@@ -9,9 +9,9 @@ from app.utils.pipeline_runner import GenerationInterrupted, GenerationJob, gene
 
 # 이미지 생성 요청을 큐에 쌓고, 워커 스레드 하나가 묶어서 처리한다.
 # 대기 중인 요청이 여러 개면
-#   1) 텍스트 인코더를 한 번만 올려 모든 요청(프롬프트+입력 이미지)을 임베딩하고
+#   1) 텍스트 인코더를 (인코더 정밀도별로) 한 번만 올려 모든 요청(프롬프트+입력 이미지)을 임베딩하고
 #   2) DiT/VAE를 정밀도(bf16/int8)별로 한 번씩만 올려 해당 이미지를 모두 생성한다.
-# 생성 도중 들어온 요청 중 같은 정밀도이고 임베딩(프롬프트+입력 이미지)이 캐시에 있는 것은 DiT를 내리지 않고 이어서 처리한다.
+# 생성 도중 들어온 요청 중 같은 DiT 정밀도이고 임베딩(프롬프트+입력 이미지+인코더 정밀도)이 캐시에 있는 것은 DiT를 내리지 않고 이어서 처리한다.
 # 워커가 하나뿐이라 동시에 생성되는 이미지는 항상 1개다.
 class GenerationWorker:
 
@@ -87,7 +87,7 @@ class GenerationWorker:
         if not batch:
             return
 
-        # 1단계: 프롬프트 임베딩 (캐시에 없는 요청이 있을 때만 인코더 로딩, 정밀도와 무관)
+        # 1단계: 프롬프트 임베딩 (캐시에 없는 요청이 있을 때만 인코더 로딩, DiT 정밀도와 무관)
         to_encode = [job.task_id for job in batch if mm.get_cached(job.embed_key) is None]
         set_status(to_encode, "encoding")
         try:

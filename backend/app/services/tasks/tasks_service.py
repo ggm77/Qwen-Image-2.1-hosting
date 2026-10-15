@@ -26,6 +26,7 @@ class TasksService:
             width=task["width"],
             seed=task["seed"],
             precision=task["precision"],
+            encoder_precision=task["encoder_precision"],
             input_image_count=len(json.loads(task["input_images"] or "[]")),
         )
 
@@ -34,7 +35,7 @@ class TasksService:
             cursor = conn.execute(
                 """
                 SELECT task_id, status, created_at, current_step, num_inference_steps,
-                       prompt, height, width, seed, precision, input_images
+                       prompt, height, width, seed, precision, encoder_precision, input_images
                 FROM tasks
                 ORDER BY created_at DESC, rowid DESC
                 LIMIT ? OFFSET ?
@@ -49,7 +50,7 @@ class TasksService:
             cursor = conn.execute(
                 """
                 SELECT task_id, status, created_at, current_step, num_inference_steps,
-                       prompt, height, width, seed, precision, input_images
+                       prompt, height, width, seed, precision, encoder_precision, input_images
                 FROM tasks
                 WHERE task_id = ?
                 """,
