@@ -437,6 +437,7 @@ const App: React.FC = () => {
 
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
 
   const [copied, setCopied] = useState<"id" | "prompt" | null>(null);
   // 방금 폼에 채운 대상: 직전 설정("last") 또는 작업 id. 잠깐 버튼 표시를 바꾸는 데만 쓴다.
@@ -860,6 +861,45 @@ const App: React.FC = () => {
     setJobs(remaining);
     if (selectedId && ids.has(selectedId)) {
       setSelectedId(remaining[0]?.id ?? null);
+    }
+  };
+
+  // 서버에 저장된 작업 기록과 이미지(결과, 입력)를 모두 지운다. 진행 중인 작업은 서버가 남겨 둔다.
+  const handleClearAll = async () => {
+    if (isClearing) return;
+    if (!window.confirm("저장된 모든 생성 기록과 이미지를 삭제할까요?\n삭제하면 되돌릴 수 없어요. (진행 중인 작업은 남겨 둬요)")) return;
+
+    setIsClearing(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/v1/tasks`, { method: "DELETE" });
+      if (!res.ok) {
+        throw new Error(await readErrorMessage(res, `기록 삭제 요청 실패: ${res.status}`));
+      }
+      const result: { kept_tasks: number } = await res.json();
+
+      // 서버에 남은 작업이 없으면 목록도 전부 비우고, 있으면 끝난 항목만 비운다.
+      removeJobs(new Set(jobs.filter((job) => result.kept_tasks === 0 || job.finished).map((job) => job.id)));
+
+      // 지워진 작업의 입력 이미지는 더 이상 가져올 수 없으므로 직전 제출 내용에서 뺀다.
+      if (lastSubmission?.inputsFrom) {
+        const next: FormSnapshot = { ...lastSubmission, inputsFrom: undefined };
+        setLastSubmission(next);
+        try {
+          localStorage.setItem(LAST_SUBMISSION_STORAGE_KEY, JSON.stringify(next));
+        } catch {
+          // 저장 실패는 무시
+        }
+      }
+
+      historyOffsetRef.current = 0;
+      setHasMoreHistory(false);
+      if (result.kept_tasks > 0) await loadHistory(); // 남은 진행 중 작업은 목록에 다시 보여 준다
+    } catch (err) {
+      console.error(err);
+      setError(err instanceof Error ? err.message : "알 수 없는 오류입니다.");
+    } finally {
+      setIsClearing(false);
     }
   };
 
@@ -1426,15 +1466,27 @@ const App: React.FC = () => {
             <div className="card task-card">
               <div className="list-head">
                 <h2 className="section-title">작업 목록 ({jobs.length})</h2>
-                {hasFinishedJobs && (
+                <div className="list-actions">
+                  {hasFinishedJobs && (
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => removeJobs(new Set(jobs.filter((job) => job.finished).map((job) => job.id)))}
+                      title="목록에서만 치워요. 서버에 저장된 기록과 이미지는 그대로예요"
+                    >
+                      완료 항목 지우기
+                    </button>
+                  )}
                   <button
                     type="button"
-                    className="btn btn-sm"
-                    onClick={() => removeJobs(new Set(jobs.filter((job) => job.finished).map((job) => job.id)))}
+                    className="btn btn-sm btn-danger"
+                    onClick={() => void handleClearAll()}
+                    disabled={isClearing}
+                    title="서버에 저장된 모든 생성 기록과 이미지를 삭제해요"
                   >
-                    완료 항목 지우기
+                    {isClearing ? "삭제 중..." : "기록·이미지 전부 삭제"}
                   </button>
-                )}
+                </div>
               </div>
               <ul className="job-list">
                 {jobs.map((job) => {

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import StreamingResponse
 
-from app.schemas.tasks.tasks import TasksResponse
+from app.schemas.tasks.tasks import ClearTasksResponse, TasksResponse
 from app.services.tasks.tasks_service import TasksService
 
 router = APIRouter(
@@ -17,6 +17,13 @@ async def get_all_tasks(
 ) -> list[TasksResponse]:
     """최근 작업부터 limit개를 돌려준다. 더 오래된 작업은 offset으로 이어서 조회한다."""
     return service.get_all_task_id(limit=limit, offset=offset)
+
+@router.delete("/tasks")
+async def clear_finished_tasks(
+    service: TasksService = Depends()
+) -> ClearTasksResponse:
+    """끝난 작업의 기록과 이미지를 모두 지운다. 대기 중이거나 생성 중인 작업은 남긴다."""
+    return service.clear_finished_tasks()
 
 @router.get("/tasks/{task_id}")
 async def get_task_status(
