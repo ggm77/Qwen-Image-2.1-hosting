@@ -5,7 +5,7 @@ from collections import deque
 from app.core.logger import logger
 from app.utils.input_images import input_images_exist
 from app.utils.model_manager import ModelManager, PromptEmbeds
-from app.utils.pipeline_runner import GenerationInterrupted, GenerationJob, generate_image, mark_failed
+from app.utils.pipeline_runner import GenerationInterrupted, GenerationJob, generate_image, mark_failed, set_status
 
 # 이미지 생성 요청을 큐에 쌓고, 워커 스레드 하나가 묶어서 처리한다.
 # 대기 중인 요청이 여러 개면
@@ -88,6 +88,8 @@ class GenerationWorker:
             return
 
         # 1단계: 프롬프트 임베딩 (캐시에 없는 요청이 있을 때만 인코더 로딩, 정밀도와 무관)
+        to_encode = [job.task_id for job in batch if mm.get_cached(job.embed_key) is None]
+        set_status(to_encode, "encoding")
         try:
             embeds = mm.encode_prompts(batch)
         except Exception as ex:
@@ -95,6 +97,7 @@ class GenerationWorker:
             for job in batch:
                 mark_failed(job.task_id)
             return
+        set_status(to_encode, "queued")  # 인코딩이 끝났다. DiT 순서가 올 때까지는 다시 대기 중이다.
 
         # 2단계: DiT는 정밀도별로 하나만 올릴 수 있으므로 정밀도별로 묶어 처리 (먼저 들어온 요청의 정밀도 순)
         groups: dict[str, list[GenerationJob]] = {}
@@ -114,6 +117,7 @@ class GenerationWorker:
     ):
         mm = self.model_manager
 
+        set_status([jobs[0].task_id], "loading")  # 먼저 생성될 요청만 로딩 중으로 표시하고, 나머지는 대기 중으로 둔다
         try:
             pipe = mm.load_generator(precision)
         except Exception as ex:

@@ -2,6 +2,7 @@ import gc
 import glob
 import os
 import threading
+import time
 from collections import OrderedDict
 
 import torch
@@ -108,12 +109,18 @@ class ModelManager:
             ).to(self.device)
 
             try:
-                for key, job in missing.items():
+                for index, (key, job) in enumerate(missing.items(), start=1):
+                    logger.info(
+                        f"[Qwen] 프롬프트 인코딩 {index}/{len(missing)} "
+                        f"(입력 이미지 {len(job.input_images)}장): {job.prompt[:40]!r}"
+                    )
+                    start_time = time.perf_counter()
                     images = self._condition_images(pipe, job.input_images) if job.input_images else None
                     with torch.no_grad():
                         embeds, mask, image_pad_mask = pipe.encode_prompt(
                             prompt=job.prompt, image=images, device=self.device,
                         )
+                    logger.info(f"[Qwen] 프롬프트 인코딩 완료 ({time.perf_counter() - start_time:.2f}초 소요)")
 
                     # 결과만 CPU로 옮겨 보관 (텍스트만 쓸 때는 이미지 토큰이 없으므로 image_pad_mask를 버린다)
                     value = (

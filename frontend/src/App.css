@@ -961,11 +961,15 @@
   background: var(--warn-soft);
 }
 
+.badge-encoding,
+.badge-loading,
 .badge-processing {
   color: var(--accent);
   background: var(--accent-soft);
 }
 
+.badge-encoding::before,
+.badge-loading::before,
 .badge-processing::before {
   animation: pulse 1.2s ease-in-out infinite;
 }

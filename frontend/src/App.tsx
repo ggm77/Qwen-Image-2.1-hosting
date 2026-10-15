@@ -104,9 +104,18 @@ const PRECISIONS: { value: Precision; title: string; desc: string }[] = [
 
 const STATUS_LABELS: Record<string, string> = {
   queued: "대기 중",
+  encoding: "인코딩 중",
+  loading: "모델 로딩 중",
   processing: "생성 중",
   completed: "완료",
   failed: "실패",
+};
+
+// 생성이 시작되기 전에 미리보기에 보여 줄 문구 (스텝 진행률이 아직 없다)
+const PREPARING_LABELS: Record<string, string> = {
+  queued: "대기 중...",
+  encoding: "프롬프트 인코딩 중...",
+  loading: "모델 로딩 중...",
 };
 
 const THEME_STORAGE_KEY = "theme";
@@ -1290,9 +1299,10 @@ const App: React.FC = () => {
                 <div className="preview-busy">
                   <span className="busy-percent">{progressPercent}%</span>
                   <span className="busy-label">
-                    {selected.status === "queued" || selected.totalSteps === 0
-                      ? "대기 중..."
-                      : `${selected.currentStep} / ${selected.totalSteps} 스텝`}
+                    {PREPARING_LABELS[selected.status] ??
+                      (selected.totalSteps === 0
+                        ? "대기 중..."
+                        : `${selected.currentStep} / ${selected.totalSteps} 스텝`)}
                   </span>
                 </div>
               ) : (

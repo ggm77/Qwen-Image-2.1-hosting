@@ -40,12 +40,35 @@ class GenerationJob:
             input_images=json.loads(row["input_images"] or "[]"),
         )
 
+# 생성이 시작되기 전 단계 (queued → encoding → loading → processing)
+#   queued: 순서를 기다리는 중 / encoding: 텍스트 인코더 로딩·프롬프트 임베딩 중 / loading: DiT/VAE 로딩 중
+# 서버가 이 단계에서 중단되면 아직 결과가 없으므로 다음 시작 때 처음부터 다시 처리한다 (db/session.py 참고).
+PREPARING_STATUSES = ("queued", "encoding", "loading")
+
+# 아직 끝나지 않은 모든 상태
+UNFINISHED_STATUSES = (*PREPARING_STATUSES, "processing")
+
+def _placeholders(values: tuple[str, ...]) -> str:
+    return ", ".join("?" * len(values))
+
+# 준비 단계 상태를 바꾼다. 이미 끝났거나 생성 중인 작업은 건드리지 않는다.
+def set_status(task_ids: list[str], status: str):
+    if not task_ids:
+        return
+    with get_db_connection() as conn:
+        conn.execute(
+            f"UPDATE tasks SET status = ? WHERE task_id IN ({_placeholders(tuple(task_ids))}) "
+            f"AND status IN ({_placeholders(PREPARING_STATUSES)})",
+            (status, *task_ids, *PREPARING_STATUSES)
+        )
+        conn.commit()
+
 # 작업 실패 처리
 def mark_failed(task_id: str):
     with get_db_connection() as conn:
         conn.execute(
-            "UPDATE tasks SET status = ? WHERE task_id = ? AND status IN ('queued', 'processing')",
-            ("failed", task_id)
+            f"UPDATE tasks SET status = ? WHERE task_id = ? AND status IN ({_placeholders(UNFINISHED_STATUSES)})",
+            ("failed", task_id, *UNFINISHED_STATUSES)
         )
         conn.commit()
 
