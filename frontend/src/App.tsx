@@ -1,6 +1,7 @@
 // src/App.tsx
 import React, { useState, useEffect, useRef } from "react";
 import "./App.css";
+import ImageAnnotator, { PenIcon } from "./ImageAnnotator";
 
 type Precision = "bf16" | "int8";
 type Theme = "system" | "light" | "dark";
@@ -19,7 +20,8 @@ type GenerateRequest = {
 type AttachedImage = {
   id: string;
   name: string;
-  dataUrl: string;
+  dataUrl: string; // 서버로 보내는 이미지. 빨간 펜 표시를 했다면 표시가 합성된 이미지다.
+  originalDataUrl?: string; // 표시하기 전의 이미지. 표시를 하지 않았으면 없다.
 };
 
 type Job = {
@@ -415,6 +417,7 @@ const App: React.FC = () => {
   // 입력 이미지가 있을 때 출력 크기를 마지막 이미지의 비율에 맡길지 (켜면 가로/세로를 보내지 않는다)
   const [followImageSize, setFollowImageSize] = useState(true);
   const [isDraggingImage, setIsDraggingImage] = useState(false);
+  const [editingImageId, setEditingImageId] = useState<string | null>(null);
 
   const [lookupTaskId, setLookupTaskId] = useState("");
 
@@ -670,6 +673,21 @@ const App: React.FC = () => {
   };
 
   const removeImage = (id: string) => setImages((prev) => prev.filter((img) => img.id !== id));
+
+  // 편집기에서 돌아온 이미지로 바꾼다. 원본으로 돌아왔으면 표시한 흔적(originalDataUrl)도 지운다.
+  const applyEditedImage = (id: string, dataUrl: string) => {
+    setImages((prev) =>
+      prev.map((img) => {
+        if (img.id !== id) return img;
+        const original = img.originalDataUrl ?? img.dataUrl;
+        return { ...img, dataUrl, originalDataUrl: dataUrl === original ? undefined : original };
+      }),
+    );
+    setEditingImageId(null);
+  };
+
+  const editingImage = images.find((img) => img.id === editingImageId) ?? null;
+  const hasMarkedImage = images.some((img) => img.originalDataUrl !== undefined);
 
   // 이미지가 있고 비율을 따르게 하면 가로/세로는 서버가 정한다.
   const sizeFromImage = images.length > 0 && followImageSize;
@@ -985,8 +1003,22 @@ const App: React.FC = () => {
                   <ul className="attach-grid">
                     {images.map((img, i) => (
                       <li key={img.id} className="attach-item">
-                        <img src={img.dataUrl} alt={`이미지${i + 1}: ${img.name}`} title={img.name} />
-                        <span className="attach-index">이미지{i + 1}</span>
+                        <button
+                          type="button"
+                          className="attach-open"
+                          onClick={() => setEditingImageId(img.id)}
+                          aria-label={`이미지${i + 1} 편집 (빨간 펜으로 표시)`}
+                          title="눌러서 빨간 펜으로 표시하기"
+                        >
+                          <img src={img.dataUrl} alt={`이미지${i + 1}: ${img.name}`} />
+                          <span className="attach-edit">
+                            <PenIcon size={12} />
+                          </span>
+                        </button>
+                        <span className="attach-index">
+                          이미지{i + 1}
+                          {img.originalDataUrl !== undefined && <span className="attach-marked" title="빨간 펜 표시 있음" />}
+                        </span>
                         <button
                           type="button"
                           className="attach-remove"
@@ -1022,7 +1054,10 @@ const App: React.FC = () => {
                 hidden
                 onChange={handleFileInput}
               />
-              <span className="hint">프롬프트에서는 이미지1, 이미지2처럼 순서로 가리켜요.</span>
+              <span className="hint">
+                프롬프트에서는 이미지1, 이미지2처럼 순서로 가리켜요. 이미지를 누르면 빨간 펜으로 고칠 부분을 표시할 수 있어요.
+                {hasMarkedImage && " 표시한 부분은 “빨간 펜으로 표시한 부분”처럼 프롬프트에서 가리키세요."}
+              </span>
             </div>
 
             <div className="field">
@@ -1448,6 +1483,17 @@ const App: React.FC = () => {
           )}
         </section>
       </main>
+
+      {editingImage && (
+        <ImageAnnotator
+          key={editingImage.id}
+          src={editingImage.dataUrl}
+          originalSrc={editingImage.originalDataUrl ?? editingImage.dataUrl}
+          title={`이미지${images.indexOf(editingImage) + 1}`}
+          onSave={(dataUrl) => applyEditedImage(editingImage.id, dataUrl)}
+          onCancel={() => setEditingImageId(null)}
+        />
+      )}
     </div>
   );
 };
