@@ -2,7 +2,7 @@
 
 **FastAPI + React 기반의 Qwen-Image 2.1 모델 호스팅 프로젝트**
 
-이 프로젝트는 FastAPI를 학습하면서 동시에 Qwen-Image 2.1 기반 이미지 생성 기능을 실제로 활용하기 위해 만든 **Fullstack AI 이미지 생성 서비스**입니다.  
+이 프로젝트는 Qwen-Image 2.1 기반 이미지 생성 기능을 실제로 활용하기 위해 만든 **Fullstack AI 이미지 생성 서비스**입니다.  
 백엔드에서는 Qwen-Image 2.1 모델을 로딩하고 이미지 생성 API를 제공하며, 프론트엔드는 React 기반 웹 UI로 사용자가 직접 이미지를 생성할 수 있도록 구성됩니다.
 
 
