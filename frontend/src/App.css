@@ -712,6 +712,12 @@
   font-variant-numeric: tabular-nums;
 }
 
+.task-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 14px;
+}
+
 .task-empty {
   margin: 0;
   font-size: 13px;

@@ -95,6 +95,7 @@ const STATUS_LABELS: Record<string, string> = {
 
 const THEME_STORAGE_KEY = "theme";
 const LAST_SUBMISSION_STORAGE_KEY = "lastSubmission";
+const LAST_RESTORE_SOURCE = "last"; // 작업 id(UUID)와 겹치지 않는 값
 
 // 숫자 입력은 문자열로 들고 있다가 제출할 때 숫자로 바꾼다. (비워도 0이 남지 않도록)
 const digitsOnly = (value: string) => value.replace(/\D/g, "");
@@ -154,6 +155,19 @@ const readStoredSubmission = (): FormSnapshot | null => {
     // 저장소를 쓸 수 없거나 JSON이 깨졌으면 무시
   }
   return null;
+};
+
+// 작업 하나의 프롬프트와 생성 설정을 폼에 채울 수 있는 형태로 바꾼다. (프롬프트나 설정을 모르면 null)
+const snapshotFromJob = (job: Job | null | undefined, fallbackPrecision: Precision): FormSnapshot | null => {
+  if (!job?.prompt || !job.settings) return null;
+  return {
+    prompts: [job.prompt],
+    width: String(job.settings.width),
+    height: String(job.settings.height),
+    steps: String(job.settings.steps),
+    seed: String(job.settings.seed),
+    precision: isPrecision(job.settings.precision) ? job.settings.precision : fallbackPrecision,
+  };
 };
 
 /* ---------- Icons ---------- */
@@ -368,7 +382,8 @@ const App: React.FC = () => {
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
 
   const [copied, setCopied] = useState<"id" | "prompt" | null>(null);
-  const [restored, setRestored] = useState(false);
+  // 방금 폼에 채운 대상: 직전 설정("last") 또는 작업 id. 잠깐 버튼 표시를 바꾸는 데만 쓴다.
+  const [restored, setRestored] = useState<string | null>(null);
   const [lastSubmission, setLastSubmission] = useState<FormSnapshot | null>(readStoredSubmission);
   const [theme, setTheme] = useState<Theme>(readStoredTheme);
 
@@ -725,31 +740,20 @@ const App: React.FC = () => {
   const selected = jobs.find((job) => job.id === selectedId) ?? null;
 
   // 직전 제출 내용. 이 브라우저에 기록이 없으면(예: 처음 열었을 때) 목록에서 가장 최근 작업을 쓴다.
-  const latestJob = jobs.find((job) => job.prompt && job.settings);
   const restorable: FormSnapshot | null =
-    lastSubmission ??
-    (latestJob?.prompt && latestJob.settings
-      ? {
-          prompts: [latestJob.prompt],
-          width: String(latestJob.settings.width),
-          height: String(latestJob.settings.height),
-          steps: String(latestJob.settings.steps),
-          seed: String(latestJob.settings.seed),
-          precision: isPrecision(latestJob.settings.precision) ? latestJob.settings.precision : precision,
-        }
-      : null);
+    lastSubmission ?? snapshotFromJob(jobs.find((job) => job.prompt && job.settings), precision);
+  const selectedSnapshot = snapshotFromJob(selected, precision);
 
-  const handleRestore = () => {
-    if (!restorable) return;
-    setPrompt(restorable.prompts.join("\n"));
-    setWidth(restorable.width);
-    setHeight(restorable.height);
-    setNumSteps(restorable.steps);
-    setSeed(restorable.seed);
-    setPrecision(restorable.precision);
+  const applySnapshot = (snapshot: FormSnapshot, source: string) => {
+    setPrompt(snapshot.prompts.join("\n"));
+    setWidth(snapshot.width);
+    setHeight(snapshot.height);
+    setNumSteps(snapshot.steps);
+    setSeed(snapshot.seed);
+    setPrecision(snapshot.precision);
     setError(null);
-    setRestored(true);
-    window.setTimeout(() => setRestored(false), 1500);
+    setRestored(source);
+    window.setTimeout(() => setRestored((current) => (current === source ? null : current)), 1500);
   };
 
   const handleCopy = async (kind: "id" | "prompt") => {
@@ -973,7 +977,7 @@ const App: React.FC = () => {
             <button
               type="button"
               className="btn restore-btn"
-              onClick={handleRestore}
+              onClick={() => restorable && applySnapshot(restorable, LAST_RESTORE_SOURCE)}
               disabled={!restorable}
               title={
                 restorable
@@ -981,8 +985,8 @@ const App: React.FC = () => {
                   : "아직 직전 작업이 없어요"
               }
             >
-              {restored ? <CheckIcon size={16} /> : <RestoreIcon />}
-              {restored ? "불러왔어요" : "직전 설정 불러오기"}
+              {restored === LAST_RESTORE_SOURCE ? <CheckIcon size={16} /> : <RestoreIcon />}
+              {restored === LAST_RESTORE_SOURCE ? "불러왔어요" : "직전 설정 불러오기"}
             </button>
           </form>
 
@@ -1130,6 +1134,19 @@ const App: React.FC = () => {
                   </span>
                   <span>{progressPercent}%</span>
                 </div>
+                {selectedSnapshot && (
+                  <div className="task-actions">
+                    <button
+                      type="button"
+                      className="btn btn-sm"
+                      onClick={() => applySnapshot(selectedSnapshot, selected.id)}
+                      title="이 작업의 프롬프트와 생성 설정을 입력 폼에 채워요"
+                    >
+                      {restored === selected.id ? <CheckIcon size={14} /> : <RestoreIcon size={14} />}
+                      {restored === selected.id ? "가져왔어요" : "이 작업 설정 가져오기"}
+                    </button>
+                  </div>
+                )}
               </>
             ) : (
               <p className="task-empty">태스크가 조회되지 않았어요.</p>
