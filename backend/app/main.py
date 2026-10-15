@@ -46,10 +46,7 @@ async def lifespan(app: FastAPI):
     # (워커 시작 전에 모두 넣어서 한 배치로 묶어 처리되게 한다)
     interrupted, requeued = recover_interrupted_tasks()
     for row in requeued:
-        app.state.generation_worker.submit(GenerationJob(
-            task_id=row["task_id"], prompt=row["prompt"], height=row["height"], width=row["width"],
-            num_inference_steps=row["num_inference_steps"], seed=row["seed"], precision=row["precision"],
-        ))
+        app.state.generation_worker.submit(GenerationJob.from_row(row))
     if interrupted or requeued:
         logger.info(f"이전 실행에서 중단된 작업 정리: 실패 처리 {interrupted}개, 다시 큐에 등록 {len(requeued)}개")
 

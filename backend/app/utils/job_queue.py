@@ -3,14 +3,15 @@ import threading
 from collections import deque
 
 from app.core.logger import logger
+from app.utils.input_images import input_images_exist
 from app.utils.model_manager import ModelManager, PromptEmbeds
 from app.utils.pipeline_runner import GenerationInterrupted, GenerationJob, generate_image, mark_failed
 
 # 이미지 생성 요청을 큐에 쌓고, 워커 스레드 하나가 묶어서 처리한다.
 # 대기 중인 요청이 여러 개면
-#   1) 텍스트 인코더를 한 번만 올려 모든 프롬프트를 임베딩하고
+#   1) 텍스트 인코더를 한 번만 올려 모든 요청(프롬프트+입력 이미지)을 임베딩하고
 #   2) DiT/VAE를 정밀도(bf16/int8)별로 한 번씩만 올려 해당 이미지를 모두 생성한다.
-# 생성 도중 들어온 요청 중 같은 정밀도이고 프롬프트 임베딩이 캐시에 있는 것은 DiT를 내리지 않고 이어서 처리한다.
+# 생성 도중 들어온 요청 중 같은 정밀도이고 임베딩(프롬프트+입력 이미지)이 캐시에 있는 것은 DiT를 내리지 않고 이어서 처리한다.
 # 워커가 하나뿐이라 동시에 생성되는 이미지는 항상 1개다.
 class GenerationWorker:
 
@@ -74,9 +75,21 @@ class GenerationWorker:
             return
         logger.info(f"[Qwen] 배치 처리 시작 (요청 {len(batch)}개)")
 
-        # 1단계: 프롬프트 임베딩 (캐시에 없는 프롬프트가 있을 때만 인코더 로딩, 정밀도와 무관)
+        # 입력 이미지 파일이 없는 요청은 이 요청만 실패시키고 나머지는 계속 처리한다
+        usable = []
+        for job in batch:
+            if input_images_exist(job.input_images):
+                usable.append(job)
+            else:
+                logger.error(f"[Qwen] 입력 이미지 파일을 찾을 수 없음: task_id={job.task_id}")
+                mark_failed(job.task_id)
+        batch = usable
+        if not batch:
+            return
+
+        # 1단계: 프롬프트 임베딩 (캐시에 없는 요청이 있을 때만 인코더 로딩, 정밀도와 무관)
         try:
-            embeds = mm.encode_prompts([job.prompt for job in batch])
+            embeds = mm.encode_prompts(batch)
         except Exception as ex:
             logger.error(f"[Qwen] 프롬프트 인코딩 실패: {ex}")
             for job in batch:
@@ -97,7 +110,7 @@ class GenerationWorker:
         self,
         precision: str,
         jobs: list[GenerationJob],
-        embeds: dict[str, PromptEmbeds],
+        embeds: dict[tuple, PromptEmbeds],
     ):
         mm = self.model_manager
 
@@ -110,13 +123,13 @@ class GenerationWorker:
             return
 
         pending: deque[tuple[GenerationJob, PromptEmbeds]] = deque(
-            (job, embeds[job.prompt]) for job in jobs
+            (job, embeds[job.embed_key]) for job in jobs
         )
         try:
             while pending and not self._stop_event.is_set():
-                job, (prompt_embeds, prompt_embeds_mask) = pending.popleft()
+                job, (prompt_embeds, prompt_embeds_mask, image_pad_mask) = pending.popleft()
                 generate_image(
-                    job, pipe, prompt_embeds, prompt_embeds_mask, self.device,
+                    job, pipe, prompt_embeds, prompt_embeds_mask, image_pad_mask, self.device,
                     should_stop=self._stop_event.is_set,
                 )
 
@@ -140,7 +153,7 @@ class GenerationWorker:
         """
         ready = []
         for job in self._drain():
-            cached = self.model_manager.get_cached(job.prompt) if job.precision == precision else None
+            cached = self.model_manager.get_cached(job.embed_key) if job.precision == precision else None
             if cached is not None:
                 ready.append((job, cached))
             else:

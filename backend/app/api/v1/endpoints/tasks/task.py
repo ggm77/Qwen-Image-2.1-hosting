@@ -33,3 +33,14 @@ async def get_task_result(
     buf = service.get_task_result(task_id=task_id)
 
     return StreamingResponse(buf, media_type="image/png")
+
+@router.get("/tasks/{task_id}/inputs/{index}")
+async def get_task_input_image(
+    task_id: str,
+    index: int,
+    service: TasksService = Depends()
+):
+    """작업에 첨부된 입력 이미지를 순서(0부터)로 돌려준다."""
+    buf = service.get_task_input_image(task_id=task_id, index=index)
+
+    return StreamingResponse(buf, media_type="image/png")

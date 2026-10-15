@@ -1,10 +1,12 @@
 from fastapi import HTTPException
 
+import json
 from io import BytesIO
 
 from app.schemas.tasks.tasks import TasksResponse
 from app.db.session import get_db_connection
 from app.core.config import settings
+from app.utils.input_images import input_image_path
 
 class TasksService:
 
@@ -22,6 +24,7 @@ class TasksService:
             width=task["width"],
             seed=task["seed"],
             precision=task["precision"],
+            input_image_count=len(json.loads(task["input_images"] or "[]")),
         )
 
     def get_all_task_id(self, limit: int = 100, offset: int = 0) -> list[TasksResponse]:
@@ -29,7 +32,7 @@ class TasksService:
             cursor = conn.execute(
                 """
                 SELECT task_id, status, created_at, current_step, num_inference_steps,
-                       prompt, height, width, seed, precision
+                       prompt, height, width, seed, precision, input_images
                 FROM tasks
                 ORDER BY created_at DESC, rowid DESC
                 LIMIT ? OFFSET ?
@@ -44,7 +47,7 @@ class TasksService:
             cursor = conn.execute(
                 """
                 SELECT task_id, status, created_at, current_step, num_inference_steps,
-                       prompt, height, width, seed, precision
+                       prompt, height, width, seed, precision, input_images
                 FROM tasks
                 WHERE task_id = ?
                 """,
@@ -96,3 +99,24 @@ class TasksService:
             buf.seek(0)
 
             return buf
+
+    def get_task_input_image(self, task_id: str, index: int) -> BytesIO:
+
+        with get_db_connection() as conn:
+            row = conn.execute(
+                "SELECT input_images FROM tasks WHERE task_id = ?",
+                (task_id,)
+            ).fetchone()
+
+        if row is None:
+            raise HTTPException(status_code=400, detail="작업을 찾을 수 없습니다.")
+
+        names = json.loads(row["input_images"] or "[]")
+        if not 0 <= index < len(names):
+            raise HTTPException(status_code=404, detail="입력 이미지를 찾을 수 없습니다.")
+
+        try:
+            with open(input_image_path(names[index]), "rb") as f:
+                return BytesIO(f.read())
+        except FileNotFoundError:
+            raise HTTPException(status_code=404, detail="입력 이미지 파일을 찾을 수 없습니다.")

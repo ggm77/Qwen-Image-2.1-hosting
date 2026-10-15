@@ -11,3 +11,4 @@ class TasksResponse(BaseModel):
     width: int
     seed: int
     precision: str
+    input_image_count: int = 0

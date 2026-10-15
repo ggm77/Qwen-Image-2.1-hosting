@@ -10,6 +10,9 @@ model/
 # generated images
 backend/app/generated_images/
 
+# input images attached to requests
+backend/app/input_images/
+
 # SQLite database
 backend/app/db/app.db
 

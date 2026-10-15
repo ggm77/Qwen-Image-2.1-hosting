@@ -15,6 +15,7 @@ def init_db():
                     num_inference_steps INTEGER NOT NULL,
                     current_step INTEGER NOT NULL DEFAULT 0,
                     precision TEXT NOT NULL DEFAULT 'bf16',
+                    input_images TEXT,
                     file_path TEXT,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
@@ -29,6 +30,12 @@ def init_db():
         # 기존 DB에는 precision 컬럼이 없을 수 있으므로 마이그레이션
         try:
             conn.execute("ALTER TABLE tasks ADD COLUMN precision TEXT NOT NULL DEFAULT 'bf16'")
+        except sqlite3.OperationalError:
+            pass  # 이미 존재함
+
+        # 기존 DB에는 input_images 컬럼이 없을 수 있으므로 마이그레이션 (입력 이미지 파일 이름의 JSON 배열)
+        try:
+            conn.execute("ALTER TABLE tasks ADD COLUMN input_images TEXT")
         except sqlite3.OperationalError:
             pass  # 이미 존재함
 
@@ -49,7 +56,7 @@ def recover_interrupted_tasks() -> tuple[int, list[sqlite3.Row]]:
         ).rowcount
         queued = conn.execute(
             """
-            SELECT task_id, prompt, height, width, num_inference_steps, seed, precision
+            SELECT task_id, prompt, height, width, num_inference_steps, seed, precision, input_images
             FROM tasks
             WHERE status = 'queued'
             ORDER BY created_at, rowid
