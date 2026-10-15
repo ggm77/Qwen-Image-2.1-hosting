@@ -26,6 +26,25 @@ type Job = {
   ratio: number;
   createdAt?: number; // ms
   info?: string; // "512×512 · 20스텝 · seed 42 · int8"
+  settings?: TaskSettings;
+};
+
+type TaskSettings = {
+  width: number;
+  height: number;
+  steps: number;
+  seed: number;
+  precision: string;
+};
+
+// 폼에 다시 채워 넣을 수 있는 직전 제출 내용. 숫자 입력은 폼과 같이 문자열로 들고 있다.
+type FormSnapshot = {
+  prompts: string[];
+  width: string;
+  height: string;
+  steps: string;
+  seed: string;
+  precision: Precision;
 };
 
 type TaskStatus = {
@@ -75,6 +94,7 @@ const STATUS_LABELS: Record<string, string> = {
 };
 
 const THEME_STORAGE_KEY = "theme";
+const LAST_SUBMISSION_STORAGE_KEY = "lastSubmission";
 
 // 숫자 입력은 문자열로 들고 있다가 제출할 때 숫자로 바꾼다. (비워도 0이 남지 않도록)
 const digitsOnly = (value: string) => value.replace(/\D/g, "");
@@ -106,6 +126,34 @@ const readStoredTheme = (): Theme => {
     // 저장소를 쓸 수 없으면 시스템 설정을 따른다
   }
   return "system";
+};
+
+const isPrecision = (value: unknown): value is Precision => PRECISIONS.some((p) => p.value === value);
+
+const isDigits = (value: unknown): value is string => typeof value === "string" && /^\d+$/.test(value);
+
+// 브라우저에 저장해 둔 직전 제출 내용을 읽는다. 형식이 맞지 않으면 없는 것으로 본다.
+const readStoredSubmission = (): FormSnapshot | null => {
+  try {
+    const raw = localStorage.getItem(LAST_SUBMISSION_STORAGE_KEY);
+    if (!raw) return null;
+    const v = JSON.parse(raw);
+    if (
+      Array.isArray(v?.prompts) &&
+      v.prompts.length > 0 &&
+      v.prompts.every((p: unknown) => typeof p === "string") &&
+      isDigits(v.width) &&
+      isDigits(v.height) &&
+      isDigits(v.steps) &&
+      isDigits(v.seed) &&
+      isPrecision(v.precision)
+    ) {
+      return v as FormSnapshot;
+    }
+  } catch {
+    // 저장소를 쓸 수 없거나 JSON이 깨졌으면 무시
+  }
+  return null;
 };
 
 /* ---------- Icons ---------- */
@@ -191,6 +239,14 @@ const CloseIcon = ({ size = 16 }: IconProps) => (
   </svg>
 );
 
+const RestoreIcon = ({ size = 16 }: IconProps) => (
+  <svg {...iconProps(size)}>
+    <path d="M3 12a9 9 0 1 0 3-6.7" />
+    <path d="M3 4v5h5" />
+    <path d="M12 8v4l3 2" />
+  </svg>
+);
+
 const SunIcon = ({ size = 18 }: IconProps) => (
   <svg {...iconProps(size)}>
     <circle cx="12" cy="12" r="4" />
@@ -221,6 +277,14 @@ const formatTime = (time: number) =>
 const describeTask = (t: Pick<TaskStatus, "width" | "height" | "num_inference_steps" | "seed" | "precision">) =>
   `${t.width}×${t.height} · ${t.num_inference_steps}스텝 · seed ${t.seed} · ${t.precision}`;
 
+const settingsOf = (t: Pick<TaskStatus, "width" | "height" | "num_inference_steps" | "seed" | "precision">): TaskSettings => ({
+  width: t.width,
+  height: t.height,
+  steps: t.num_inference_steps,
+  seed: t.seed,
+  precision: t.precision,
+});
+
 // 서버가 돌려준 작업 하나를 목록 항목으로 바꾼다. 완료된 작업의 이미지는 결과 API를 그대로 가리킨다.
 const jobFromTask = (task: TaskStatus): Job => {
   const completed = task.status === "completed";
@@ -237,6 +301,7 @@ const jobFromTask = (task: TaskStatus): Job => {
     ratio: task.width > 0 && task.height > 0 ? task.width / task.height : 1,
     createdAt: parseServerTime(task.created_at),
     info: describeTask(task),
+    settings: settingsOf(task),
   };
 };
 
@@ -303,6 +368,8 @@ const App: React.FC = () => {
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
 
   const [copied, setCopied] = useState<"id" | "prompt" | null>(null);
+  const [restored, setRestored] = useState(false);
+  const [lastSubmission, setLastSubmission] = useState<FormSnapshot | null>(readStoredSubmission);
   const [theme, setTheme] = useState<Theme>(readStoredTheme);
 
   const pollTimersRef = useRef<Map<string, number>>(new Map());
@@ -412,6 +479,7 @@ const App: React.FC = () => {
           totalSteps: data.num_inference_steps,
           createdAt: parseServerTime(data.created_at),
           info: describeTask(data),
+          settings: settingsOf(data),
         });
 
         if (data.status === "completed") {
@@ -555,6 +623,7 @@ const App: React.FC = () => {
             ratio,
             createdAt: Date.now(),
             info: `${widthValue}×${heightValue} · ${stepsValue}스텝 · seed ${seedValue} · ${precision}`,
+            settings: { width: widthValue, height: heightValue, steps: stepsValue, seed: seedValue, precision },
           });
         } else {
           console.error(result.reason);
@@ -568,6 +637,21 @@ const App: React.FC = () => {
         setSelectedId(created[0].id);
         created.forEach((job) => startPolling(job.id));
         revealStage();
+
+        const snapshot: FormSnapshot = {
+          prompts: created.map((job) => job.prompt ?? ""),
+          width,
+          height,
+          steps: numSteps,
+          seed,
+          precision,
+        };
+        setLastSubmission(snapshot);
+        try {
+          localStorage.setItem(LAST_SUBMISSION_STORAGE_KEY, JSON.stringify(snapshot));
+        } catch {
+          // 저장 실패는 무시 (이번 세션에서만 유지)
+        }
       }
 
       if (failedLines.length > 0) {
@@ -639,6 +723,34 @@ const App: React.FC = () => {
   };
 
   const selected = jobs.find((job) => job.id === selectedId) ?? null;
+
+  // 직전 제출 내용. 이 브라우저에 기록이 없으면(예: 처음 열었을 때) 목록에서 가장 최근 작업을 쓴다.
+  const latestJob = jobs.find((job) => job.prompt && job.settings);
+  const restorable: FormSnapshot | null =
+    lastSubmission ??
+    (latestJob?.prompt && latestJob.settings
+      ? {
+          prompts: [latestJob.prompt],
+          width: String(latestJob.settings.width),
+          height: String(latestJob.settings.height),
+          steps: String(latestJob.settings.steps),
+          seed: String(latestJob.settings.seed),
+          precision: isPrecision(latestJob.settings.precision) ? latestJob.settings.precision : precision,
+        }
+      : null);
+
+  const handleRestore = () => {
+    if (!restorable) return;
+    setPrompt(restorable.prompts.join("\n"));
+    setWidth(restorable.width);
+    setHeight(restorable.height);
+    setNumSteps(restorable.steps);
+    setSeed(restorable.seed);
+    setPrecision(restorable.precision);
+    setError(null);
+    setRestored(true);
+    window.setTimeout(() => setRestored(false), 1500);
+  };
 
   const handleCopy = async (kind: "id" | "prompt") => {
     const text = kind === "id" ? selected?.id : selected?.prompt;
@@ -856,6 +968,21 @@ const App: React.FC = () => {
                   {promptLines.length > 1 ? `이미지 ${promptLines.length}장 생성` : "이미지 생성"}
                 </>
               )}
+            </button>
+
+            <button
+              type="button"
+              className="btn restore-btn"
+              onClick={handleRestore}
+              disabled={!restorable}
+              title={
+                restorable
+                  ? `프롬프트 ${restorable.prompts.length}개, ${restorable.width}×${restorable.height}, ${restorable.steps}스텝, seed ${restorable.seed}, ${restorable.precision}`
+                  : "아직 직전 작업이 없어요"
+              }
+            >
+              {restored ? <CheckIcon size={16} /> : <RestoreIcon />}
+              {restored ? "불러왔어요" : "직전 설정 불러오기"}
             </button>
           </form>
 

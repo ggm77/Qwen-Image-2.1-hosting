@@ -423,6 +423,12 @@
   border-radius: 10px;
 }
 
+.restore-btn {
+  width: 100%;
+  margin-top: -10px;
+  color: var(--text-2);
+}
+
 .kbd {
   padding: 2px 6px;
   border-radius: 6px;
