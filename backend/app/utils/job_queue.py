@@ -5,7 +5,9 @@ from collections import deque
 from app.core.logger import logger
 from app.utils.input_images import input_images_exist
 from app.utils.model_manager import ModelManager, PromptEmbeds
-from app.utils.pipeline_runner import GenerationInterrupted, GenerationJob, generate_image, mark_failed, set_status
+from app.utils.pipeline_runner import (
+    GenerationInterrupted, GenerationJob, GenerationOutOfMemory, generate_image, is_out_of_memory, mark_failed, set_status,
+)
 
 # 이미지 생성 요청을 큐에 쌓고, 워커 스레드 하나가 묶어서 처리한다.
 # 대기 중인 요청이 여러 개면
@@ -90,17 +92,25 @@ class GenerationWorker:
         # 1단계: 프롬프트 임베딩 (캐시에 없는 요청이 있을 때만 인코더 로딩, DiT 정밀도와 무관)
         to_encode = [job.task_id for job in batch if mm.get_cached(job.embed_key) is None]
         set_status(to_encode, "encoding")
-        try:
-            embeds = mm.encode_prompts(batch)
-        except Exception as ex:
-            logger.error(f"[Qwen] 프롬프트 인코딩 실패: {ex}")
-            for job in batch:
-                mark_failed(job.task_id)
-            embeds = None
-        if embeds is None:
+        embeds = None
+        for attempt in (1, 2):
+            out_of_memory = False
+            try:
+                embeds = mm.encode_prompts(batch)
+                break
+            except Exception as ex:
+                logger.error(f"[Qwen] 프롬프트 인코딩 실패: {ex}")
+                out_of_memory = is_out_of_memory(ex)
             # 예외의 traceback이 인코더를 붙잡고 있어 encode_prompts 안에서의 해제는 효과가 없었다.
             # except 블록을 벗어나 traceback이 사라진 뒤에 다시 비운다.
             mm.free_memory()
+            if not out_of_memory or attempt == 2:
+                break
+            # 이미 임베딩된 요청은 캐시에 남아 있어 나머지만 다시 인코딩한다
+            logger.warning("[Qwen] 메모리 부족으로 인코딩 실패, 메모리를 비우고 한 번 더 시도합니다")
+        if embeds is None:
+            for job in batch:
+                mark_failed(job.task_id)
             return
         set_status(to_encode, "queued")  # 인코딩이 끝났다. DiT 순서가 올 때까지는 다시 대기 중이다.
 
@@ -141,10 +151,30 @@ class GenerationWorker:
         try:
             while pending and not self._stop_event.is_set():
                 job, (prompt_embeds, prompt_embeds_mask, image_pad_mask) = pending.popleft()
-                generate_image(
-                    job, pipe, prompt_embeds, prompt_embeds_mask, image_pad_mask, self.device,
-                    should_stop=self._stop_event.is_set,
-                )
+                retried = False
+                while True:
+                    try:
+                        generate_image(
+                            job, pipe, prompt_embeds, prompt_embeds_mask, image_pad_mask, self.device,
+                            should_stop=self._stop_event.is_set,
+                        )
+                        break
+                    except GenerationOutOfMemory:
+                        pass
+                    # 메모리 부족: except 블록을 벗어나 traceback이 사라진 뒤에 DiT를 내렸다가 다시 올려 한 번만 재시도한다
+                    if retried:
+                        logger.error(f"[Qwen] 재시도해도 메모리가 부족해 실패 처리: task_id={job.task_id}")
+                        mark_failed(job.task_id)
+                        break
+                    retried = True
+                    logger.warning(f"[Qwen] 메모리 부족, 모델을 다시 올려 재시도합니다: task_id={job.task_id}")
+                    pipe = None
+                    mm.free_memory()
+                    try:
+                        pipe = mm.load_generator(precision)
+                    except Exception:
+                        mark_failed(job.task_id)  # 남은 요청은 아래 바깥 except에서 실패 처리된다
+                        raise
                 # 요청마다 크기(해상도, 입력 이미지 수)가 달라 이전 이미지의 버퍼(KV 캐시, 어텐션 등)가
                 # MPS 캐시에 남아 쌓이므로 이미지마다 비운다 (실패한 이미지도 generate_image 안에서 예외가 끝난 뒤라 해제된다)
                 mm.free_memory()

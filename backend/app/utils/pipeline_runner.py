@@ -16,6 +16,16 @@ from app.utils.input_images import load_input_images
 class GenerationInterrupted(Exception):
     """서버 종료 때문에 생성을 중단할 때 사용한다. 작업은 queued로 되돌아가 다음 시작 때 다시 처리된다."""
 
+class GenerationOutOfMemory(Exception):
+    """생성 중 메모리가 부족했을 때 사용한다. 작업은 processing으로 남겨 두므로 호출한 쪽이 재시도하거나 실패 처리해야 한다."""
+
+def is_out_of_memory(ex: BaseException) -> bool:
+    """MPS는 OOM을 일반 RuntimeError로 던지므로 메시지로 판별한다."""
+    if isinstance(ex, torch.OutOfMemoryError):
+        return True
+    message = str(ex).lower()
+    return isinstance(ex, RuntimeError) and ("out of memory" in message or "invalid buffer size" in message)
+
 @dataclass
 class GenerationJob:
     task_id: str
@@ -183,6 +193,11 @@ def generate_image(
 
         except Exception as ex:
             logger.error(f"[Qwen] 이미지 생성 중 오류 발생: {ex}")
+            if is_out_of_memory(ex):
+                # 실패로 처리하지 않고 진행률만 되돌린다. 모델을 다시 올려 재시도할지는 호출한 쪽이 정한다.
+                conn.execute("UPDATE tasks SET current_step = 0 WHERE task_id = ?", (job.task_id,))
+                conn.commit()
+                raise GenerationOutOfMemory() from None
             conn.execute(
                 "UPDATE tasks SET status = ? WHERE task_id = ?",
                 ("failed", job.task_id)
