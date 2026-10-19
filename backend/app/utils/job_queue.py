@@ -6,7 +6,7 @@ from app.core.logger import logger
 from app.utils.input_images import input_images_exist
 from app.utils.model_manager import ModelManager, PromptEmbeds
 from app.utils.pipeline_runner import (
-    GenerationInterrupted, GenerationJob, GenerationOutOfMemory, generate_image, is_out_of_memory, mark_failed, set_status,
+    GenerationInterrupted, GenerationJob, GenerationOutOfMemory, generate_image, is_out_of_memory, mark_failed, mark_retrying, set_status,
 )
 
 # 이미지 생성 요청을 큐에 쌓고, 워커 스레드 하나가 묶어서 처리한다.
@@ -108,6 +108,7 @@ class GenerationWorker:
                 break
             # 이미 임베딩된 요청은 캐시에 남아 있어 나머지만 다시 인코딩한다
             logger.warning("[Qwen] 메모리 부족으로 인코딩 실패, 메모리를 비우고 한 번 더 시도합니다")
+            mark_retrying(to_encode)
         if embeds is None:
             for job in batch:
                 mark_failed(job.task_id)
@@ -157,6 +158,7 @@ class GenerationWorker:
                         generate_image(
                             job, pipe, prompt_embeds, prompt_embeds_mask, image_pad_mask, self.device,
                             should_stop=self._stop_event.is_set,
+                            status="retrying" if retried else "processing",
                         )
                         break
                     except GenerationOutOfMemory:
@@ -168,6 +170,7 @@ class GenerationWorker:
                         break
                     retried = True
                     logger.warning(f"[Qwen] 메모리 부족, 모델을 다시 올려 재시도합니다: task_id={job.task_id}")
+                    mark_retrying([job.task_id])
                     pipe = None
                     mm.free_memory()
                     try:

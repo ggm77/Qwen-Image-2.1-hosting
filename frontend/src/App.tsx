@@ -116,6 +116,7 @@ const STATUS_LABELS: Record<string, string> = {
   encoding: "인코딩 중",
   loading: "모델 로딩 중",
   processing: "생성 중",
+  retrying: "재시도 중",
   completed: "완료",
   failed: "실패",
 };
@@ -1385,10 +1386,12 @@ const App: React.FC = () => {
                 <div className="preview-busy">
                   <span className="busy-percent">{progressPercent}%</span>
                   <span className="busy-label">
-                    {PREPARING_LABELS[selected.status] ??
-                      (selected.totalSteps === 0
-                        ? "대기 중..."
-                        : `${selected.currentStep} / ${selected.totalSteps} 스텝`)}
+                    {selected.status === "retrying"
+                      ? `메모리 부족으로 재시도 중... ${selected.currentStep} / ${selected.totalSteps} 스텝`
+                      : (PREPARING_LABELS[selected.status] ??
+                        (selected.totalSteps === 0
+                          ? "대기 중..."
+                          : `${selected.currentStep} / ${selected.totalSteps} 스텝`))}
                   </span>
                 </div>
               ) : (

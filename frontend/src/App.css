@@ -986,7 +986,8 @@
   background: currentColor;
 }
 
-.badge-queued {
+.badge-queued,
+.badge-retrying {
   color: var(--warn);
   background: var(--warn-soft);
 }
@@ -1000,7 +1001,8 @@
 
 .badge-encoding::before,
 .badge-loading::before,
-.badge-processing::before {
+.badge-processing::before,
+.badge-retrying::before {
   animation: pulse 1.2s ease-in-out infinite;
 }
 

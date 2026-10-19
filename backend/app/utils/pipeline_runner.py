@@ -57,21 +57,37 @@ class GenerationJob:
 # 서버가 이 단계에서 중단되면 아직 결과가 없으므로 다음 시작 때 처음부터 다시 처리한다 (db/session.py 참고).
 PREPARING_STATUSES = ("queued", "encoding", "loading")
 
+# 메모리 부족으로 인코딩/생성을 다시 하는 중 (retrying). 프론트가 재시도 중임을 알 수 있도록 별도 상태로 둔다.
+RETRYING_STATUS = "retrying"
+
 # 아직 끝나지 않은 모든 상태
-UNFINISHED_STATUSES = (*PREPARING_STATUSES, "processing")
+UNFINISHED_STATUSES = (*PREPARING_STATUSES, "processing", RETRYING_STATUS)
 
 def _placeholders(values: tuple[str, ...]) -> str:
     return ", ".join("?" * len(values))
 
-# 준비 단계 상태를 바꾼다. 이미 끝났거나 생성 중인 작업은 건드리지 않는다.
+# 준비 단계 상태를 바꾼다 (인코딩 재시도 중인 작업 포함). 이미 끝났거나 생성 중인 작업은 건드리지 않는다.
 def set_status(task_ids: list[str], status: str):
+    if not task_ids:
+        return
+    settable = (*PREPARING_STATUSES, RETRYING_STATUS)
+    with get_db_connection() as conn:
+        conn.execute(
+            f"UPDATE tasks SET status = ? WHERE task_id IN ({_placeholders(tuple(task_ids))}) "
+            f"AND status IN ({_placeholders(settable)})",
+            (status, *task_ids, *settable)
+        )
+        conn.commit()
+
+# 메모리 부족으로 다시 시도하는 작업을 retrying으로 표시하고 진행률을 0으로 되돌린다.
+def mark_retrying(task_ids: list[str]):
     if not task_ids:
         return
     with get_db_connection() as conn:
         conn.execute(
-            f"UPDATE tasks SET status = ? WHERE task_id IN ({_placeholders(tuple(task_ids))}) "
-            f"AND status IN ({_placeholders(PREPARING_STATUSES)})",
-            (status, *task_ids, *PREPARING_STATUSES)
+            f"UPDATE tasks SET status = ?, current_step = 0 "
+            f"WHERE task_id IN ({_placeholders(tuple(task_ids))}) AND status IN ({_placeholders(UNFINISHED_STATUSES)})",
+            (RETRYING_STATUS, *task_ids, *UNFINISHED_STATUSES)
         )
         conn.commit()
 
@@ -108,15 +124,16 @@ def generate_image(
         image_pad_mask: torch.Tensor | None,
         device: str,
         should_stop=lambda: False,
+        status: str = "processing",  # 생성 중에 표시할 상태 (OOM 재시도 중이면 retrying)
 ):
     # DB 연결
     with get_db_connection() as conn:
 
         try:
-            # 상태를 processing으로 변경
+            # 상태를 processing(재시도 중이면 retrying)으로 변경
             conn.execute(
                 "UPDATE tasks SET status = ? WHERE task_id = ?",
-                ("processing", job.task_id)
+                (status, job.task_id)
             )
             conn.commit()
 
